@@ -116,3 +116,5 @@ Early project. **API may change.** It runs a full short visual novel — from ti
 ## License
 
 MIT
+
+See [`docs/getting-started.md`](docs/getting-started.md).

@@ -116,3 +116,5 @@ crates/
 ## License
 
 MIT
+
+完整教程见 [`docs/getting-started.md`](docs/getting-started.md)。
