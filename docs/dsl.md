@@ -1,0 +1,278 @@
+# timesnow DSL 语法参考
+
+timesnow 使用自研的剧本 DSL，文件扩展名为 `.tsn`。
+
+## 基本结构
+
+```
+# 这是注释，整行忽略
+
+:: block_name
+@say "..."
+@jump other_block
+
+:: other_block
+@say "..."
+```
+
+- `::` 定义块。块名不能重复。脚本的**第一个块**是入口。
+- `@` 开头是指令。**每行最多一条**。
+- `#` 开头是注释，行尾也可以写注释。
+- 块之间通过 `@jump` 跳转。
+
+## 对话
+
+```
+@say "这是一句旁白。"
+@say 小雪 "这是一句台词。"
+```
+
+- `@say "..."` → 旁白，无角色名。
+- `@say 角色名 "..."` → 有角色名的对话。
+
+**角色名不加引号。** 名字里有空格用引号包：`@say "老张 张" "..."`。
+
+**台词里的引号用中文的 `""`，不用转义。**
+
+## 场景与立绘
+
+```
+@scene forest
+@show adrian at 0.55 0.10 0.40 0.85
+@hide adrian
+@clear
+```
+
+- `@scene 名字` — 换背景。
+- `@show 名字 at x y w h` — 显示立绘。
+- `@hide 名字` — 隐藏指定立绘。
+- `@clear` — 清空所有立绘。
+
+**坐标全部是归一化的 0~1：**
+
+| 参数 | 含义 |
+|---|---|
+| `x` | 左边缘距屏幕左边的比例 |
+| `y` | 上边缘距屏幕顶部的比例 |
+| `w` | 宽度占屏幕的比例 |
+| `h` | 高度占屏幕的比例 |
+
+**常见位置：**
+
+| 位置 | x | y | w | h |
+|---|---|---|---|---|
+| 居中 | 0.30 | 0.10 | 0.40 | 0.85 |
+| 右侧 | 0.55 | 0.10 | 0.40 | 0.85 |
+| 左侧 | 0.05 | 0.10 | 0.40 | 0.85 |
+
+**后 `@show` 的画在上面。** 有遮挡关系时注意顺序。
+
+## 流程控制
+
+```
+@jump chapter2
+
+@if greeted
+    @say "你打过招呼。"
+@else
+    @say "你没打招呼。"
+@say "继续。"
+```
+
+- `@jump 块名` — 无条件跳转。
+- `@if 条件` — 条件分支。`@else` 可选。
+
+**缩进随意，只要同一块内一致。** 2 空格、4 空格、Tab 都能跑。
+
+**`@if` 之后的内容如果没有 `@else`，直接接下一个同级指令：**
+
+```
+@if flag
+    @say "真"
+@say "总是执行"
+```
+
+## 条件表达式
+
+| 写法 | 含义 |
+|---|---|
+| `flag` | flag 为 true |
+| `not flag` | flag 不为 true |
+| `a and b` | 两个都为真 |
+| `a or b` | 至少一个为真 |
+| `score > 50` | 大于 |
+| `score < 50` | 小于 |
+| `score == 50` | 等于 |
+| `score != 50` | 不等于 |
+
+**可以组合**，优先级从低到高：`or` → `and` → `not` → 比较。
+
+```
+@if greeted and score > 50
+@if not greeted or score < 10
+@if (a or b) and c
+```
+
+## 选项
+
+```
+@choice
+    打招呼 -> greet { greeted = true }
+    沉默 -> silent
+    直接离开 -> leave { greeted = false, mood = "cold" }
+```
+
+- `显示文本 -> 目标块` — 基本形式。
+- `{ 变量 = 值, ... }` — 可选，选中时设置这些变量。
+
+**`@choice` 至少需要一个选项。**
+
+## 变量
+
+```
+@set score = 42
+@set name = "阿德里安"
+@set greeted = true
+```
+
+- 整数：`@set score = 42`
+- 字符串：`@set name = "阿德里安"`
+- 布尔：`@set greeted = true` / `false`
+
+**变量是全局的。** 在任意块里设，其他块都能读。
+
+## 演出
+
+```
+@wait 0.5
+@fade to 0.0 1.0
+@fade to 1.0 0.5
+@fade to 0.5 0.0
+```
+
+- `@wait 秒数` — 等待。期间点击无效。
+- `@fade to alpha 时长` — 全局淡入淡出。
+
+**`@fade` 的 alpha：** `0.0` 全黑，`1.0` 正常。
+
+**常用转场组合：**
+
+```
+@fade to 0.0 0.5      # 淡出到黑
+@scene new_place      # 换背景
+@clear                # 清立绘
+@fade to 1.0 0.5      # 淡入
+```
+
+**`@fade to 0.0 0.0`** — 立刻切到全黑，不耗时。
+
+## 音频
+
+```
+@play bgm main
+@play bgm battle
+@play se click
+@stop bgm
+```
+
+- `@play bgm 名字` — 播放 BGM（循环）。会先停掉当前 BGM。
+- `@play se 名字` — 播放一次性音效。
+- `@stop bgm` — 停止 BGM。
+
+**`bgm` 和 `se` 是通道名。** 音频文件放在 `assets/audio/bgm/` 和 `assets/audio/se/` 下，文件名（去扩展名）就是音频名。
+
+## 完整示例
+
+```
+:: title
+@scene bg_title
+@play bgm main
+@say "——《电话》——"
+@choice
+    开始 -> start
+    退出 -> quit
+
+:: start
+@scene bg_sunset
+@say "我被裁员了。我没有地方去了。"
+@say "或许能试试打电话？"
+@say "但是打给谁呢？"
+@choice
+    前女友 -> ex
+    青梅 -> childhood
+    学姐 -> senior
+
+:: ex
+@say "那个，我没地方去了……"
+@wait 1.5
+@say 前女友 "你怎么现在才知道找我？"
+@jump end
+
+:: childhood
+@say 青梅 "你这样了才知道找我，记得买几包薯片来。"
+@jump end
+
+:: senior
+@say 学姐 "学姐煮了咖啡。等会一起喝点。"
+@jump end
+
+:: quit
+@say "下次再打吧。"
+@fade to 0.0 1.0
+
+:: end
+@fade to 0.0 2.0
+@jump title
+```
+
+## 常见错误
+
+| 错误 | 原因 |
+|---|---|
+| `@say 小雪 你好` | 字符串没加引号 |
+| `@if greeted and` | 条件不完整 |
+| `@choice` 后没缩进 | 选项需要缩进 |
+| `@jump` 到不存在的块 | 块名拼错了 |
+| 用了全角的 `＠` `：` `（）` | 必须用半角英文符号 |
+| `@include` 路径写错 | 相对于当前文件 |
+
+## 多文件
+
+主文件用 `@include` 引入其他文件：
+
+```
+# script.tsn
+@include chapters/ch1.tsn
+@include chapters/ch2.tsn
+
+:: start
+@jump ch1_start
+```
+
+被 include 的文件只写 `::` 块，不写 `@include` 和 `:: start`。
+
+**路径相对于当前文件。** `chapters/ch1.tsn` 里如果再 include，写 `sub/scene.tsn` 会找 `chapters/sub/scene.tsn`。
+
+**修改任意被 include 的文件都会触发热重载。**
+
+## 语法规则速查
+
+| 想写 | 写法 |
+|---|---|
+| 旁白 | `@say "文本"` |
+| 角色说话 | `@say 名字 "文本"` |
+| 换背景 | `@scene 名字` |
+| 显示立绘 | `@show 名字 at x y w h` |
+| 隐藏立绘 | `@hide 名字` |
+| 清空立绘 | `@clear` |
+| 跳转 | `@jump 块名` |
+| 设变量 | `@set 名字 = 值` |
+| 条件 | `@if 条件` / `@else` |
+| 选项 | `@choice` + 缩进 |
+| 停顿 | `@wait 秒数` |
+| 淡入淡出 | `@fade to alpha 时长` |
+| 音乐 | `@play bgm 名字` |
+| 音效 | `@play se 名字` |
+| 停止音乐 | `@stop bgm` |
+| 注释 | `# 内容` |
+| 引入文件 | `@include 路径` |
