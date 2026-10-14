@@ -18,7 +18,7 @@ A visual novel engine written in Rust, with its own DSL.
 
 ```toml
 [dependencies]
-timesnow = { git = "https://github.com/TimeAngler/timesnow" }
+timesnow = { git = "https://github.com/TimeAngler/timesnow", tag = "v0.1.0" }
 anyhow = "1"
 ```
 
