@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/minimal", "examples/phone"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+rhai = "1"
+serde = { version = "1", features = ["derive"]}
+ron = "0.12"
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3

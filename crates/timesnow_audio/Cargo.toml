@@ -1,0 +1,8 @@
+[package]
+name = "timesnow_audio"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+kira = { version = "0.12", features = ["flac"] }
+anyhow = "1"

@@ -1,0 +1,8 @@
+[package]
+name = "phone"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+timesnow = { path = "../../crates/timesnow" }
+anyhow = "1"

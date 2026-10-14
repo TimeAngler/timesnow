@@ -1,0 +1,8 @@
+:: start
+@say "我被裁员了。我没有地方去了。"
+@say "或许能试试打电话？"
+@say "但是打给谁呢？"
+@choice
+    前女友 -> ex
+    青梅 -> childhood
+    学姐 -> senior

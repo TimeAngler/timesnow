@@ -1,0 +1,20 @@
+[package]
+name = "timesnow_runtime"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "timesnow_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+timesnow_audio = { path = "../timesnow_audio"}
+timesnow_render = { path = "../timesnow_render"}
+
+winit = "0.30"
+anyhow = "1"
+
+toml = { version = "1", features = ["serde"] }
+
+serde.workspace = true
+ron.workspace = true

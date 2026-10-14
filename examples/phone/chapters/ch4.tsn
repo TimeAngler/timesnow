@@ -1,0 +1,9 @@
+:: senior
+@play se jonasblakewood_jingle_bells_jingle_bells_music
+@say "没必要亲自来接我的，学姐。"
+@wait 1.0
+@say 学姐 "你在外面肯定不好受。"
+@say 学姐 "我煮了点咖啡。等会一起喝。还是以前的老口味。"
+@wait 0.5
+@say "好······好的，学姐。"
+@jump end

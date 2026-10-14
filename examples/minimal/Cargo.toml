@@ -1,0 +1,9 @@
+[package]
+name = "minimal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+timesnow = { path = "../../crates/timesnow" }
+anyhow = "1"

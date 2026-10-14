@@ -1,0 +1,6 @@
+:: start
+@say "Hello, world."
+@say "这是 timesnow 最小示例。"
+@say "改这个文件，保存，游戏会立刻变。"
+@wait 1.0
+@say "—— 完 ——"

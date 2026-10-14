@@ -1,0 +1,36 @@
+[window]
+title = "Minimal Example"
+width = 1280
+height = 720
+
+[textbox]
+x = 0.05
+y = 0.72
+w = 0.90
+h = 0.22
+
+[text]
+font_size = 42.0
+line_height = 54.0
+scale = 1.0
+x = 0.08
+y = 0.78
+color = [255, 255, 255]
+# 每个字间隔秒数
+speed = 0.03
+
+name_x = 0.08
+name_y = 0.73
+name_scale = 1.1
+name_color = [255, 220, 180]
+
+[choice]
+x = 0.20
+w = 0.60
+h = 0.08
+gap = 0.02
+# 文字相对选项框的横向偏移
+text_pad_x = 0.05
+# 文字相对选项框的纵向偏移
+text_pad_y = 0.30
+color = [220, 220, 220]
