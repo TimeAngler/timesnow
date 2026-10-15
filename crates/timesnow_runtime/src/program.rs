@@ -25,6 +25,10 @@ pub enum SaveNotice {
     VersionTooNew { found: u32, expected: u32 },
     /// 剧本被改过（指纹不同），位置按文本找回来了
     ScriptChanged { fell_back_to_block_start: bool },
+    /// 存档时停在选项上，但读档时那组选项变了（改了选项文本/数量/目标）
+    ChoiceChanged { was: usize, now: usize },
+    /// 同时有多条要告诉玩家的（比如"剧本改过" + "选项也变了"）
+    Multiple(Vec<SaveNotice>),
 }
 
 impl std::fmt::Display for SaveNotice {
@@ -40,9 +44,20 @@ impl std::fmt::Display for SaveNotice {
             SaveNotice::ScriptChanged {
                 fell_back_to_block_start: false,
             } => write!(f, "剧本改动过，已按文本找回原来的位置"),
+            SaveNotice::ChoiceChanged { was, now } => write!(
+                f,
+                "存档时这里的选项有 {was} 个，现在有 {now} 个（剧本改过）"
+            ),
+            SaveNotice::Multiple(list) => {
+                let parts: Vec<String> = list.iter().map(|n| n.to_string()).collect();
+                write!(f, "{}", parts.join("；"))
+            }
         }
     }
 }
+
+/// 存档时停在的那组选项（只存文本，用来读档时核对）
+pub type ChoiceTexts = Vec<String>;
 
 /// 存档内容。
 ///
@@ -71,6 +86,10 @@ pub struct SaveData {
     /// 最后一次说完的台词，读档后对话框不是空的
     #[serde(default)]
     pub last_say: Option<(Option<String>, String)>,
+    /// 存档时停在选项上：那组选项的文本（按显示顺序）。
+    /// 读档时和当前剧本里那组选项核对，数量或文本对不上就回退到本段开头。
+    #[serde(default)]
+    pub pending_choices: Option<ChoiceTexts>,
 }
 
 /// 剧本结构指纹：块名 + 每块 step 数量 + 每个 step 的类型标签。

@@ -318,6 +318,18 @@ A corrupt image logs `纹理解码失败，已跳过: xxx` and is skipped; every
 
 Press `S` to save, `L` to load. The save file is called `save.ron`, stored in the project root.
 
+**What it stores:** current block and position, all variables, the stage (background and sprites),
+the BGM that's playing, and the last line spoken. **Saving while a choice is on screen works too** —
+loading puts you back on the same set of options.
+
+**Loading after you've edited the script:** the engine relocates by matching the line text; if it
+can't, you're taken back to the start of the current block and the console says so. If you saved on
+a choice and that set of options has changed (text or count), you get a notice — the position is kept
+whenever possible, so you don't have to re-read earlier lines.
+
+**Old saves still load.** The format carries a version number; saves from before versioning are
+treated as v1 rather than being rejected.
+
 ## Next
 
 - Full grammar reference: [`dsl.md`](dsl.md)

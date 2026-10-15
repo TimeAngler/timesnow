@@ -877,7 +877,19 @@ impl Script {
             stage: self.vm.stage().clone(),
             bgm,
             last_say: self.last_say.clone(),
+            pending_choices: self.pending_choice_texts(),
         }
+    }
+
+    /// 当前停在选项上时，那组选项的文本（按显示顺序）
+    fn pending_choice_texts(&self) -> Option<Vec<String>> {
+        let choices = self.vm.pending_choice()?;
+        Some(
+            choices
+                .iter()
+                .map(|c| self.vm.expand_text(&c.text))
+                .collect(),
+        )
     }
 
     pub fn load_from(
@@ -940,6 +952,17 @@ impl Script {
         let outcome = self.vm.run_until_blocked();
         self.absorb(outcome);
 
+        // 存档时停在选项上：核对现在这组选项还是不是原来那组。
+        // 剧本改过选项文本/数量的话位置可能已经不对，那就退回本段开头。
+        if let Some(saved) = &data.pending_choices
+            && let Some(extra) = self.reconcile_pending_choice(saved)
+        {
+            notice = Some(match notice {
+                Some(existing) => SaveNotice::Multiple(vec![existing, extra]),
+                None => extra,
+            });
+        }
+
         // 停在 Say 上时整句显示，读档后不会是空对话框
         self.presentation.visible_chars = self
             .current_full_text()
@@ -947,6 +970,39 @@ impl Script {
             .unwrap_or(0);
 
         notice
+    }
+
+    /// 核对读档后的选项界面和存档时是不是同一组。
+    ///
+    /// - 正停在选项上、文本也一致 → 什么都不用做，玩家直接回到原来的选项界面
+    /// - 正停在选项上、但文本变了 → **保留位置**，只提示一声。
+    ///   退回本段开头会让玩家重看前面的台词，太粗暴了。
+    /// - 压根没停在选项上（剧本改动把位置挪走了）→ 才退回本段开头
+    fn reconcile_pending_choice(&mut self, saved: &[String]) -> Option<SaveNotice> {
+        match self.pending_choice_texts() {
+            Some(now) if now == saved => None,
+            Some(now) => Some(SaveNotice::ChoiceChanged {
+                was: saved.len(),
+                now: now.len(),
+            }),
+            None => {
+                let notice = SaveNotice::ChoiceChanged {
+                    was: saved.len(),
+                    now: 0,
+                };
+                self.rewind_to_block_start();
+                Some(notice)
+            }
+        }
+    }
+
+    /// 回到当前块开头，重新跑一遍
+    fn rewind_to_block_start(&mut self) {
+        let block = self.vm.block().to_string();
+        self.vm.set_cursor(&block, 0);
+        self.vm.clear_pending_choice();
+        let outcome = self.vm.run_until_blocked();
+        self.absorb(outcome);
     }
 
     /// 剧本变了之后找位置：优先"同块 + 同一句台词"，找不到就退回块开头
@@ -1419,6 +1475,116 @@ mod tests {
         assert_eq!(back.current_block, data.current_block);
         assert_eq!(back.bgm.as_deref(), Some("main"), "存档要记住在播的 BGM");
         assert_eq!(back.vars.get("n"), Some(&Value::Int(3)));
+    }
+
+    /// 停在选项上存档 → 读档后应该回到同一组选项，而不是滑到别处
+    #[test]
+    fn save_at_a_choice_restores_the_choice_screen() {
+        let src = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let mut s = script(src);
+        s.update(1.0); // 打完"选一个"
+        s.advance(); // 走到 @choice
+        assert_eq!(s.pending_choices().map(|c| c.len()), Some(2));
+
+        let data = s.save_data();
+        assert_eq!(
+            data.pending_choices.as_deref(),
+            Some(&["打招呼".to_string(), "沉默".to_string()][..]),
+            "存档要记住那组选项"
+        );
+
+        let mut fresh = script(src);
+        let notice = fresh.apply_save(data);
+        assert!(notice.is_none(), "同一份剧本不该有提示：{notice:?}");
+        assert_eq!(
+            fresh.pending_choices().map(|c| c.len()),
+            Some(2),
+            "读档后应当回到选项界面"
+        );
+        // 选项还能点，并且走对分支
+        fresh.select_choice(1);
+        fresh.update(1.0);
+        assert_eq!(fresh.current_full_text().as_deref(), Some("……"));
+    }
+
+    /// 选项文本被改过：不能默默把玩家放到可能对不上的分支上，要提示并退回本段开头
+    #[test]
+    fn save_at_a_choice_warns_when_options_changed() {
+        let before = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let after = ":: start\n@say \"选一个\"\n@choice\n    挥手 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let mut s = script(before);
+        s.update(1.0);
+        s.advance();
+        let data = s.save_data();
+
+        let mut fresh = script(after);
+        let notice = fresh.apply_save(data);
+        assert_eq!(
+            notice,
+            Some(SaveNotice::ChoiceChanged { was: 2, now: 2 }),
+            "选项文本变了也要提示"
+        );
+        // 位置保留：玩家仍在选项界面，不用重看前面的台词
+        assert_eq!(
+            fresh.pending_choices().map(|c| c.len()),
+            Some(2),
+            "文本变了但还停在选项上，不该把玩家退回本段开头"
+        );
+        assert_eq!(
+            fresh.visible_choices().first().map(|c| c.text.as_str()),
+            Some("挥手"),
+            "看到的应当是改过之后的选项"
+        );
+    }
+
+    /// 选项数量变了
+    #[test]
+    fn save_at_a_choice_warns_when_option_count_changed() {
+        let before = ":: start\n@choice\n    甲 -> end\n    乙 -> end\n\n:: end\n@say \"完\"\n";
+        let after = ":: start\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n";
+        let s = script(before);
+        let data = s.save_data();
+        assert_eq!(data.pending_choices.as_ref().map(|c| c.len()), Some(2));
+
+        let mut fresh = script(after);
+        let notice = fresh.apply_save(data);
+        assert_eq!(notice, Some(SaveNotice::ChoiceChanged { was: 2, now: 1 }));
+    }
+
+    /// 剧本重写后压根不再停在选项上：也要退回本段开头，而不是留在半路
+    #[test]
+    fn save_at_a_choice_recovers_when_choice_is_gone() {
+        let before = ":: start\n@say \"甲\"\n@choice\n    走 -> other\n\n:: other\n@say \"到了\"\n";
+        let mut s = script(before);
+        s.update(1.0);
+        s.advance();
+        assert!(s.pending_choices().is_some());
+        let data = s.save_data();
+
+        // 选项整段没了
+        let after = ":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n";
+        let mut fresh = script(after);
+        let notice = fresh.apply_save(data);
+        // 剧本结构变了 + 选项没了 —— 两条提示都要给出来
+        let text = notice.as_ref().map(|n| n.to_string()).unwrap_or_default();
+        assert!(
+            text.contains("剧本改动") && text.contains("选项"),
+            "两条提示都该出现，实际: {notice:?}"
+        );
+        assert!(fresh.pending_choices().is_none());
+        // 回到本段开头 = 停在"甲"
+        assert_eq!(fresh.current_full_text().as_deref(), Some("甲"));
+    }
+
+    /// 旧存档没有 pending_choices 字段，读进来应当是 None（不报错）
+    #[test]
+    fn legacy_save_has_no_pending_choices() {
+        let s = script(":: start\n@say \"甲\"\n");
+        let mut data = s.save_data();
+        data.pending_choices = None;
+        let mut fresh = script(":: start\n@say \"甲\"\n");
+        let notice = fresh.apply_save(data);
+        assert!(notice.is_none(), "没有选项信息就不该提示：{notice:?}");
     }
 
     /// 读档后要把 BGM 恢复出来
