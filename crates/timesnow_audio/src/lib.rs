@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use kira::{
-    sound::static_sound::{StaticSoundData, StaticSoundHandle},
     AudioManager, AudioManagerSettings, DefaultBackend, Tween,
+    sound::static_sound::{StaticSoundData, StaticSoundHandle},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,8 @@ impl AudioEngine {
     /// 播放 BGM，会先停掉当前 BGM（1 秒淡出）。循环播放。
     pub fn play_bgm(&mut self, name: &str) -> Result<()> {
         if let Some(mut h) = self.bgm_handle.take() {
-            let _ = h.stop(Tween {
+            // stop() 返回 ()，直接调用即可
+            h.stop(Tween {
                 duration: std::time::Duration::from_secs(1),
                 ..Default::default()
             });
@@ -60,7 +61,7 @@ impl AudioEngine {
 
     pub fn stop_bgm(&mut self) {
         if let Some(mut h) = self.bgm_handle.take() {
-            let _ = h.stop(Tween::default());
+            h.stop(Tween::default());
         }
     }
 
@@ -97,7 +98,9 @@ fn scan_audio_dir(
     if !dir.exists() {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();

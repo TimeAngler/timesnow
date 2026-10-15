@@ -2,28 +2,36 @@ use super::error::ParseError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    BlockName(String),      // :: 后面的名字
-    Directive(String),      // @ 后面的指令名
-    Ident(String),          // 裸标识符：说话人、变量名、块引用
-    Str(String),            // 字符串字面量（已解转义）
-    Float(f64),             // 数字，统一存 f64，用的时候判断整数/浮点
-    Eq,                     // =
-    Arrow,                  // ->
-    Gt, Lt, Ge, Le,         // > < >= <=
-    EqEq, Ne,               // == !=
-    And, Or, Not,           // 关键字
-    LBrace, RBrace,         // { }
-    LParen, RParen,         // ( )
-    Comma,                  // ,
-    Colon,                  // :   （用在 @if ... : ... 里，或将来扩展）
+    BlockName(String), // :: 后面的名字
+    Directive(String), // @ 后面的指令名
+    Ident(String),     // 裸标识符：说话人、变量名、块引用
+    Str(String),       // 字符串字面量（已解转义）
+    Float(f64),        // 数字，统一存 f64，用的时候判断整数/浮点
+    Eq,                // =
+    Arrow,             // ->
+    Gt,
+    Lt,
+    Ge,
+    Le, // > < >= <=
+    EqEq,
+    Ne, // == !=
+    And,
+    Or,
+    Not, // 关键字
+    LBrace,
+    RBrace, // { }
+    LParen,
+    RParen, // ( )
+    Comma,  // ,
+    Colon,  // :   （用在 @if ... : ... 里，或将来扩展）
 }
 
 #[derive(Debug, Clone)]
 pub struct Line {
-    pub indent: usize,          // 空格数（tab 算 4）
-    pub tokens: Vec<Token>,     // 这一行的 token
-    pub number: usize,          // 行号，报错用
-    pub raw: String,            // 原始行内容，报错用
+    pub indent: usize,      // 空格数（tab 算 4）
+    pub tokens: Vec<Token>, // 这一行的 token
+    pub number: usize,      // 行号，报错用
+    pub raw: String,        // 原始行内容，报错用
 }
 
 pub fn lex_file(input: &str) -> Result<Vec<Line>, ParseError> {
@@ -81,8 +89,8 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
         }
 
         // 块名 ::
-        if c == ':' && pos + 1 < chars.len() &&chars[pos + 1] == ':' {
-            pos +=2;
+        if c == ':' && pos + 1 < chars.len() && chars[pos + 1] == ':' {
+            pos += 2;
 
             // 跳过空格
             while pos < chars.len() && (chars[pos] == ' ' || chars[pos] == '\t') {
@@ -105,9 +113,7 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
         if c == '@' {
             pos += 1;
             let start = pos;
-            while pos < chars.len()
-                && (chars[pos].is_alphanumeric() || chars[pos] == '_')
-            {
+            while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
                 pos += 1;
             }
             let name: String = chars[start..pos].iter().collect();
@@ -129,9 +135,7 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
         // 数字
         if c.is_ascii_digit() {
             let start = pos;
-            while pos < chars.len()
-                && (chars[pos].is_ascii_digit() || chars[pos] == '.')
-            {
+            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '.') {
                 pos += 1;
             }
             let s: String = chars[start..pos].iter().collect();
@@ -143,7 +147,7 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
                         start + 1,
                         &format!("无法解析数字: {s}"),
                         raw,
-                    ))
+                    ));
                 }
             }
             continue;
@@ -237,9 +241,7 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
         // 标识符（英文、中文都走这里）
         if c.is_alphanumeric() || c == '_' {
             let start = pos;
-            while pos < chars.len()
-                && (chars[pos].is_alphanumeric() || chars[pos] == '_')
-            {
+            while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
                 pos += 1;
             }
             let s: String = chars[start..pos].iter().collect();
@@ -263,8 +265,12 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-fn lex_string(chars: &[char], start_pos: usize, raw: &str, line_number: usize)
-    -> Result<(String, usize), ParseError> {
+fn lex_string(
+    chars: &[char],
+    start_pos: usize,
+    raw: &str,
+    line_number: usize,
+) -> Result<(String, usize), ParseError> {
     // chars[start_pos] 是开头的 "
     let mut pos = start_pos + 1;
     let mut result = String::new();
@@ -275,7 +281,7 @@ fn lex_string(chars: &[char], start_pos: usize, raw: &str, line_number: usize)
             return Ok((result, pos + 1));
         }
         if c == '\\' {
-            if pos + 1 < chars.len() {
+            if pos + 1 >= chars.len() {
                 return Err(err(line_number, pos + 1, "字符串以反斜杠结尾", raw));
             }
             let next = chars[pos + 1];
@@ -290,7 +296,7 @@ fn lex_string(chars: &[char], start_pos: usize, raw: &str, line_number: usize)
                         pos + 1,
                         &format!("未知转义字符: \\{next}"),
                         raw,
-                    ))
+                    ));
                 }
             };
             result.push(escaped);
@@ -315,23 +321,5 @@ fn err(line: usize, column: usize, message: &str, raw: &str) -> ParseError {
         column,
         message: message.to_string(),
         snippet: raw.to_string(),
-    }
-}
-
-pub struct Lexer<'a> {
-    input: &'a str,
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
-    line: usize,
-    column: usize,
-}
-
-impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
-        Self {
-            input,
-            chars: input.chars().peekable(),
-            line: 1,
-            column: 1,
-        }
     }
 }

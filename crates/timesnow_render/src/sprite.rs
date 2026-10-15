@@ -1,5 +1,5 @@
-use wgpu::util::DeviceExt;
 use std::collections::HashMap;
+use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -37,10 +37,22 @@ struct TransformUniform {
 }
 
 const VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 0.0], uv: [0.0, 0.0] }, // 左上
-    Vertex { position: [1.0, 0.0], uv: [1.0, 0.0] }, // 右上
-    Vertex { position: [1.0, 1.0], uv: [1.0, 1.0] }, // 右下
-    Vertex { position: [0.0, 1.0], uv: [0.0, 1.0] }, // 左下
+    Vertex {
+        position: [0.0, 0.0],
+        uv: [0.0, 0.0],
+    }, // 左上
+    Vertex {
+        position: [1.0, 0.0],
+        uv: [1.0, 0.0],
+    }, // 右上
+    Vertex {
+        position: [1.0, 1.0],
+        uv: [1.0, 1.0],
+    }, // 右下
+    Vertex {
+        position: [0.0, 1.0],
+        uv: [0.0, 1.0],
+    }, // 左下
 ];
 
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
@@ -59,7 +71,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn fullscreen() -> Self {
@@ -68,8 +85,13 @@ impl Rect {
 }
 
 struct TextureEntry {
+    /// 这三个字段不直接读取，但必须持有：一旦 drop，wgpu 的纹理/采样器
+    /// 就被回收，绑定组会变成悬空引用。
+    #[allow(dead_code)]
     texture: wgpu::Texture,
+    #[allow(dead_code)]
     view: wgpu::TextureView,
+    #[allow(dead_code)]
     sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
 }
@@ -85,6 +107,11 @@ pub struct SpriteRenderer {
 
     textures: HashMap<String, TextureEntry>,
     instances: Vec<(String, Rect)>,
+
+    /// 本帧已经提示过的缺失 sprite 名（同一帧里一个名字只提示一次）
+    reported_missing: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// 整个进程内提示过的缺失 sprite 名，避免同一个名字刷满控制台
+    warned_missing: std::cell::RefCell<std::collections::HashSet<String>>,
 
     global_alpha: f32,
 }
@@ -118,23 +145,21 @@ impl SpriteRenderer {
             ],
         });
 
-        let transform_bgl = device.create_bind_group_layout(
-            &wgpu::BindGroupLayoutDescriptor {
-                label: Some("sprite transform bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<TransformUniform>() as u64,
-                        ),
-                    },
-                    count: None,
-                }],
-            }
-        );
+        let transform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sprite transform bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<TransformUniform>() as u64,
+                    ),
+                },
+                count: None,
+            }],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite pipeline layout"),
@@ -187,31 +212,25 @@ impl SpriteRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let transform_buffer = device.create_buffer(
-            &wgpu::BufferDescriptor {
-                label: Some("sprite transforms"),
-                size: INSTANCE_ALIGN * MAX_INSTANCES as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }
-        );
+        let transform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sprite transforms"),
+            size: INSTANCE_ALIGN * MAX_INSTANCES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
-        let transform_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("sprite transform bg"),
-                layout: &transform_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &transform_buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(
-                            std::mem::size_of::<TransformUniform>() as u64,
-                        ),
-                    }),
-                }],
-            }
-        );
+        let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sprite transform bg"),
+            layout: &transform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &transform_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<TransformUniform>() as u64),
+                }),
+            }],
+        });
 
         Self {
             pipeline,
@@ -223,18 +242,19 @@ impl SpriteRenderer {
             transform_bind_group,
             textures: HashMap::new(),
             instances: Vec::new(),
+            reported_missing: std::cell::RefCell::new(std::collections::HashSet::new()),
+            warned_missing: std::cell::RefCell::new(std::collections::HashSet::new()),
             global_alpha: 1.0,
         }
     }
 
-    pub fn load(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        name: &str,
-        bytes: &[u8],
-    ) {
-        let img = image::load_from_memory(bytes).expect("纹理解码失败").to_rgba8();
+    pub fn load(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, name: &str, bytes: &[u8]) {
+        // 一张坏图不该拖垮整个引擎：跳过它，其它资源照常加载
+        let Ok(decoded) = image::load_from_memory(bytes) else {
+            eprintln!("纹理解码失败，已跳过: {name}");
+            return;
+        };
+        let img = decoded.to_rgba8();
         let dims = img.dimensions();
         let size = wgpu::Extent3d {
             width: dims.0,
@@ -242,17 +262,16 @@ impl SpriteRenderer {
             depth_or_array_layers: 1,
         };
 
-        let texture = device.create_texture(
-            &wgpu::TextureDescriptor {
-                label: Some(name),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(name),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -277,33 +296,36 @@ impl SpriteRenderer {
             ..Default::default()
         });
 
-        let bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("sprite texture bg"),
-                layout: &self.texture_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            }
-        );
-
-        self.textures.insert(name.to_string(), TextureEntry {
-            texture,
-            view,
-            sampler,
-            bind_group,
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sprite texture bg"),
+            layout: &self.texture_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
+
+        self.textures.insert(
+            name.to_string(),
+            TextureEntry {
+                texture,
+                view,
+                sampler,
+                bind_group,
+            },
+        );
     }
 
     pub fn begin_frame(&mut self) {
         self.instances.clear();
+        // 每帧重新收集，保证同一个缺失名字在一帧里只提示一次
+        self.reported_missing.borrow_mut().clear();
     }
 
     pub fn queue(&mut self, name: &str, rect: Rect) {
@@ -315,14 +337,28 @@ impl SpriteRenderer {
     }
 
     /// 把所有实例的 transform 一次性写入共享 buffer。在 pass 之前调用。
+    /// 顺带报告缺失的 sprite：放在这里而不是 `draw` 里，是为了不用 `&mut self`
+    /// （`draw` 期间的借用无法可变）。
     pub fn upload(&self, queue: &wgpu::Queue) {
-        for (i, (_, rect)) in self.instances.iter().enumerate() {
+        for (i, (name, rect)) in self.instances.iter().enumerate() {
             let transform = TransformUniform {
                 rect: [rect.x, rect.y, rect.width, rect.height],
                 params: [self.global_alpha, 0.0, 0.0, 0.0],
             };
             let offset = i as u64 * INSTANCE_ALIGN;
-            queue.write_buffer(&self.transform_buffer, offset, bytemuck::bytes_of(&transform));
+            queue.write_buffer(
+                &self.transform_buffer,
+                offset,
+                bytemuck::bytes_of(&transform),
+            );
+
+            // 缺失提示：一个名字整个进程只报一次，不刷屏
+            if !self.textures.contains_key(name)
+                && self.reported_missing.borrow_mut().insert(name.clone())
+                && self.warned_missing.borrow_mut().insert(name.clone())
+            {
+                eprintln!("sprite 不存在: {name}");
+            }
         }
     }
 
@@ -332,7 +368,9 @@ impl SpriteRenderer {
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
         for (i, (name, _)) in self.instances.iter().enumerate() {
-            let Some(entry) = self.textures.get(name) else { continue };
+            let Some(entry) = self.textures.get(name) else {
+                continue;
+            };
             let offset = (i as u64 * INSTANCE_ALIGN) as u32;
             pass.set_bind_group(0, &entry.bind_group, &[]);
             pass.set_bind_group(1, &self.transform_bind_group, &[offset]);
@@ -343,5 +381,4 @@ impl SpriteRenderer {
     pub fn set_alpha(&mut self, alpha: f32) {
         self.global_alpha = alpha.clamp(0.0, 1.0);
     }
-
 }

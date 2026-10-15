@@ -1,8 +1,22 @@
+use crate::config::Config;
+use crate::dsl::DslError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use crate::config::Config;
+
+/// 记录一组文件的修改时间，用于热重载检测
+fn collect_mtimes(paths: &[PathBuf]) -> Vec<(PathBuf, SystemTime)> {
+    paths
+        .iter()
+        .filter_map(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| (p.clone(), t))
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 pub struct VisibleChoice {
@@ -49,6 +63,8 @@ pub enum Cond {
     Ne { name: String, value: Value },
     Gt { name: String, value: Value },
     Lt { name: String, value: Value },
+    Ge { name: String, value: Value },
+    Le { name: String, value: Value },
     Truthy { name: String },
     Not(Box<Cond>),
     And(Vec<Cond>),
@@ -65,19 +81,54 @@ pub struct ChoiceOption {
 
 #[derive(Deserialize, Clone, Debug)]
 pub enum Step {
-    Say { speaker: Option<String>, text: String },
-    Jump { target: String },
-    Choice { options: Vec<ChoiceOption> },
-    Set { name: String, value: Value },
-    If { cond: Cond, then: String, #[serde(rename = "else")] else_block: String, },
-    Scene { background: String },
-    Show { sprite: String, x: f32, y: f32, w: f32, h: f32 },
-    Hide { sprite: String },
-    Wait { duration: f32 },
+    Say {
+        speaker: Option<String>,
+        text: String,
+    },
+    Jump {
+        target: String,
+    },
+    Choice {
+        options: Vec<ChoiceOption>,
+    },
+    Set {
+        name: String,
+        value: Value,
+    },
+    If {
+        cond: Cond,
+        then: String,
+        #[serde(rename = "else")]
+        else_block: String,
+    },
+    Scene {
+        background: String,
+    },
+    Show {
+        sprite: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    Hide {
+        sprite: String,
+    },
+    Wait {
+        duration: f32,
+    },
     Clear,
-    Fade { to: f32, duration: f32 },
-    Play { channel: String, name: String },
-    Stop { channel: String },
+    Fade {
+        to: f32,
+        duration: f32,
+    },
+    Play {
+        channel: String,
+        name: String,
+    },
+    Stop {
+        channel: String,
+    },
 }
 
 #[derive(Deserialize, Debug)]
@@ -92,6 +143,8 @@ pub struct ChoiceLayout {
     pub w: f32,
     pub h: f32,
     pub gap: f32,
+    /// 选项组整体的垂直中心（归一化），默认 0.5 = 屏幕正中
+    pub y_center: f32,
 }
 
 pub enum AudioEvent {
@@ -182,20 +235,13 @@ impl Script {
         Ok(())
     }
 
-    pub fn load(project_dir: &Path, config: &Config) -> Self {
-        let script_path = project_dir.join("script.tsn");
-        let (file, included) = crate::dsl::parse_with_includes(&script_path)
-            .unwrap_or_else(|e| panic!("DSL 解析失败:\n{e}"));
+    /// 从剧本文件加载。出错时返回带文件名+行号的 `DslError`，
+    /// 由调用方决定是退出还是画错误页——引擎不再自己 panic。
+    pub fn load(script_path: &Path, config: &Config) -> Result<Self, DslError> {
+        let (file, included) = crate::dsl::parse_with_includes(script_path)?;
 
         // 记录所有文件的 mtime
-        let file_mtimes: Vec<(PathBuf, SystemTime)> = included
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::metadata(&p).ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| (p, t))
-            })
-            .collect();
+        let file_mtimes: Vec<(PathBuf, SystemTime)> = collect_mtimes(&included);
 
         let start = file.start.clone();
         let mut script = Self {
@@ -207,7 +253,7 @@ impl Script {
             visible_chars: 0,
             text_timer: 0.0,
             pending_choice: None,
-            main_path: script_path,
+            main_path: script_path.to_path_buf(),
             file_mtimes,
             stage: Default::default(),
             last_say: String::new(),
@@ -217,6 +263,7 @@ impl Script {
                 w: config.choice.w,
                 h: config.choice.h,
                 gap: config.choice.gap,
+                y_center: config.choice.y_center,
             },
             wait_timer: 0.0,
             current_alpha: 1.0,
@@ -227,18 +274,17 @@ impl Script {
             audio_events: vec![],
         };
         script.process_current_step();
-        script
+        Ok(script)
     }
 
-    fn read_file(path: &std::path::Path) -> (ScriptFile, SystemTime) {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
-        let file = crate::dsl::parse(&content)
-            .unwrap_or_else(|e| panic!("DSL 解析失败:\n{e}"));
-        let mtime = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        (file, mtime)
+    /// 剧本 + 它 include 过的所有文件（热重载看这些文件的时间戳）
+    pub fn watched_files(&self) -> Vec<PathBuf> {
+        self.file_mtimes.iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// 主剧本文件路径
+    pub fn main_path(&self) -> &Path {
+        &self.main_path
     }
 
     /// 每帧调用，推进打字机
@@ -277,9 +323,16 @@ impl Script {
             return;
         };
         let full = text.chars().count();
+
+        // speed <= 0：关掉打字机，整句直接出来
+        if self.speed <= 0.0 {
+            self.visible_chars = full;
+            return;
+        }
+
         self.text_timer += dt;
-        while self.text_timer >= 0.03 && self.visible_chars < full {
-            self.text_timer -= 0.03;
+        while self.text_timer >= self.speed && self.visible_chars < full {
+            self.text_timer -= self.speed;
             self.visible_chars += 1;
         }
     }
@@ -288,7 +341,9 @@ impl Script {
         // 检查所有文件是否有变化
         let mut changed = false;
         for (path, old_mtime) in &self.file_mtimes {
-            let Ok(meta) = std::fs::metadata(path) else { continue };
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
             let Ok(mtime) = meta.modified() else { continue };
             if Some(mtime) != Some(*old_mtime) {
                 changed = true;
@@ -302,20 +357,14 @@ impl Script {
         // 重新展开并解析
         let (file, included_files) = match crate::dsl::parse_with_includes(&self.main_path) {
             Ok(x) => x,
+            // 解析失败保留旧剧本继续跑（错误由 --check / 错误页负责展示）
             Err(e) => {
-                eprintln!("DSL 解析失败:\n{e}");
+                eprintln!("剧本解析失败，继续使用上一版:\n{e}");
                 return;
             }
         };
 
-        self.file_mtimes = included_files
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::metadata(&p).ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| (p, t))
-            })
-            .collect();
+        self.file_mtimes = collect_mtimes(&included_files);
 
         self.blocks = file.blocks;
         self.start_block = file.start.clone();
@@ -326,7 +375,11 @@ impl Script {
             self.current_step = 0;
         }
         // 当前 step 越界就回到 block 开头
-        let len = self.blocks.get(&self.current_block).map(|b| b.len()).unwrap_or(0);
+        let len = self
+            .blocks
+            .get(&self.current_block)
+            .map(|b| b.len())
+            .unwrap_or(0);
         if self.current_step >= len {
             self.current_step = 0;
         }
@@ -368,8 +421,9 @@ impl Script {
             return;
         }
 
-        if self.pending_choice.is_some() { return; }
-        let Some(Step::Say { text, .. }) = self.current_step() else { return; };
+        let Some(Step::Say { text, .. }) = self.current_step() else {
+            return;
+        };
 
         let full = text.chars().count();
         if self.visible_chars < full {
@@ -385,7 +439,9 @@ impl Script {
 
     /// 选项模式下按键或点击选择
     pub fn select_choice(&mut self, index: usize) {
-        let Some(choices) = self.pending_choice.take() else { return };
+        let Some(choices) = self.pending_choice.take() else {
+            return;
+        };
         let Some(opt) = choices.get(index) else {
             // 索引越界，把选项放回去
             self.pending_choice = Some(choices);
@@ -393,7 +449,7 @@ impl Script {
         };
         if !self.blocks.contains_key(&opt.target) {
             eprintln!("错误：选项 '{}' 跳到不存在的块 '{}'", opt.text, opt.target);
-            self.pending_choice = Some(choices);   // 把选项放回去，别让玩家卡住
+            self.pending_choice = Some(choices); // 把选项放回去，别让玩家卡住
             return;
         }
 
@@ -415,7 +471,20 @@ impl Script {
 
     /// 处理当前 step：跳过 Jump，遇到 Choice 停下，遇到 Say 停下
     fn process_current_step(&mut self) {
+        // 预算上限：防止互相 @jump 把渲染帧挂死
+        const MAX_HOPS: usize = 10_000;
+        let mut hops = 0usize;
+
         loop {
+            if hops >= MAX_HOPS {
+                eprintln!(
+                    "脚本可能有循环跳转，已停止推进（块 '{}' 第 {} 条）",
+                    self.current_block, self.current_step
+                );
+                return;
+            }
+            hops += 1;
+
             let Some(block) = self.blocks.get(&self.current_block) else {
                 eprintln!("错误：块 '{}' 不存在", self.current_block);
                 return;
@@ -440,8 +509,16 @@ impl Script {
                     self.vars.insert(name, value);
                     self.current_step += 1;
                 }
-                Step::If { cond, then, else_block } => {
-                    let target = if self.eval_cond(&cond) { then } else { else_block };
+                Step::If {
+                    cond,
+                    then,
+                    else_block,
+                } => {
+                    let target = if self.eval_cond(&cond) {
+                        then
+                    } else {
+                        else_block
+                    };
                     self.current_block = target;
                     self.current_step = 0;
                 }
@@ -451,7 +528,9 @@ impl Script {
                 }
                 Step::Show { sprite, x, y, w, h } => {
                     self.stage.characters.retain(|(n, _)| n != &sprite);
-                    self.stage.characters.push((sprite, StageRect { x, y, w, h }));
+                    self.stage
+                        .characters
+                        .push((sprite, StageRect { x, y, w, h }));
                     self.current_step += 1;
                 }
                 Step::Hide { sprite } => {
@@ -509,6 +588,14 @@ impl Script {
                 (Some(Value::Int(n)), Value::Int(v)) => *n < *v,
                 _ => false,
             },
+            Cond::Ge { name, value } => match (self.vars.get(name), value) {
+                (Some(Value::Int(n)), Value::Int(v)) => *n >= *v,
+                _ => false,
+            },
+            Cond::Le { name, value } => match (self.vars.get(name), value) {
+                (Some(Value::Int(n)), Value::Int(v)) => *n <= *v,
+                _ => false,
+            },
             Cond::Truthy { name } => {
                 matches!(self.vars.get(name), Some(Value::Bool(true)))
             }
@@ -523,24 +610,23 @@ impl Script {
     }
 
     pub fn visible_choices(&self) -> Vec<VisibleChoice> {
-        let Some(choices) = &self.pending_choice else { return Vec::new(); };
+        let Some(choices) = &self.pending_choice else {
+            return Vec::new();
+        };
+        let l = &self.choice_layout;
         let total = choices.len();
-        let x = 0.20;
-        let w = 0.60;
-        let h = 0.08;
-        let gap = 0.02;
-        let total_h = total as f32 * h + (total.saturating_sub(1)) as f32 * gap;
-        let start_y = 0.5 - total_h / 2.0;
+        let total_h = total as f32 * l.h + (total.saturating_sub(1)) as f32 * l.gap;
+        let start_y = l.y_center - total_h / 2.0;
 
         choices
             .iter()
             .enumerate()
             .map(|(i, c)| VisibleChoice {
                 text: c.text.clone(),
-                x,
-                y: start_y + i as f32 * (h + gap),
-                w,
-                h,
+                x: l.x,
+                y: start_y + i as f32 * (l.h + l.gap),
+                w: l.w,
+                h: l.h,
             })
             .collect()
     }
@@ -561,11 +647,11 @@ impl Script {
             w: config.choice.w,
             h: config.choice.h,
             gap: config.choice.gap,
+            y_center: config.choice.y_center,
         };
     }
 
     pub fn current_alpha(&self) -> f32 {
         self.current_alpha
     }
-
 }

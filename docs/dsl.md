@@ -102,6 +102,8 @@ timesnow 使用自研的剧本 DSL，文件扩展名为 `.tsn`。
 | `a or b` | 至少一个为真 |
 | `score > 50` | 大于 |
 | `score < 50` | 小于 |
+| `score >= 50` | 大于等于 |
+| `score <= 50` | 小于等于 |
 | `score == 50` | 等于 |
 | `score != 50` | 不等于 |
 
@@ -110,8 +112,11 @@ timesnow 使用自研的剧本 DSL，文件扩展名为 `.tsn`。
 ```
 @if greeted and score > 50
 @if not greeted or score < 10
+@if score >= 10 and score <= 99
 @if (a or b) and c
 ```
+
+`>` `<` `>=` `<=` 只对整数变量生效；变量没设过、或类型不是整数时，这四种比较一律算 false（不会报错）。
 
 ## 选项
 
@@ -254,6 +259,13 @@ timesnow 使用自研的剧本 DSL，文件扩展名为 `.tsn`。
 **路径相对于当前文件。** `chapters/ch1.tsn` 里如果再 include，写 `sub/scene.tsn` 会找 `chapters/sub/scene.tsn`。
 
 **修改任意被 include 的文件都会触发热重载。**
+
+**报错会指到真正写错的那个文件。** 即使有十几层 include，报的也是 `chapters/ch2.tsn:9` 这样的位置，
+而不是"拼起来之后那一大段文本的第几行"。校验用：
+
+```bash
+cargo run -- --check
+```
 
 ## 语法规则速查
 

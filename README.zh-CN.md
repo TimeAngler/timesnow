@@ -46,6 +46,15 @@ fn main() -> anyhow::Result<()> {
 cargo run
 ```
 
+不开窗口检查剧本（适合 CI）：
+
+```bash
+cargo run -- --check
+```
+
+错误会精确到 `文件:行:列`——语法错、跳转目标不存在、剧本引用了但 `assets/` 里没有的资源，
+都会列出来。有错误时退出码非 0。
+
 ## 示例
 
 - [`examples/minimal`](examples/minimal) — 最小可运行示例
@@ -86,7 +95,7 @@ my_game/
 ├── config.toml
 └── assets/
     ├── bg/                  # 背景
-    ├── char/                # 立绘
+    ├── character/           # 立绘
     ├── ui/                  # UI 元素（对话框等）
     └── audio/
         ├── bgm/
@@ -117,4 +126,4 @@ crates/
 
 MIT
 
-完整教程见 [`docs/getting-started.md`](docs/getting-started.md)。
+完整教程见 [中文](docs/getting-started.md) | [English](docs/getting-started.en.md)。

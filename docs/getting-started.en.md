@@ -95,6 +95,8 @@ x = 0.20
 w = 0.60
 h = 0.08
 gap = 0.02
+# vertical center of the whole choice group; 0.5 = middle of the screen
+y_center = 0.5
 text_pad_x = 0.05
 text_pad_y = 0.30
 color = [220, 220, 220]
@@ -105,17 +107,22 @@ color = [220, 220, 220]
 | Section | Field | Meaning |
 |---|---|---|
 | `[window]` | `title` | Window title |
-| | `width` / `height` | Initial window size |
-| `[textbox]` | `x y w h` | Textbox position and size (normalized 0~1) |
+| | `width` / `height` | Initial window size (changing this needs a restart) |
+| `[textbox]` | `x y w h` | Textbox background position and size (normalized 0~1) |
 | `[text]` | `font_size` | Body text size |
 | | `line_height` | Line height, usually `font_size × 1.3` |
 | | `x` / `y` | Text position (normalized) |
 | | `color` | Text RGB |
-| | `speed` | Typewriter speed, seconds per character |
+| | `speed` | Typewriter speed, seconds per character; `0` disables the typewriter |
 | | `name_*` | Speaker name styling |
 | `[choice]` | `x w h gap` | Choice layout |
+| | `y_center` | Vertical center of the choice group, `0.5` = middle of the screen |
 | | `text_pad_*` | Text offset within the choice box |
 | | `color` | Choice text color |
+
+**Every field is optional — omit it and you get the default.** The values above *are* the defaults,
+so you can paste the whole block or keep only the lines you want to change.
+Body text wraps automatically at the textbox width.
 
 **Change any of these, save, and the game updates instantly — no restart, no rebuild.**
 
@@ -126,14 +133,18 @@ In the project root:
 ```
 assets/
 ├── bg/           # backgrounds
-├── char/         # character sprites
+├── character/    # character sprites
 ├── ui/           # UI elements (textbox, etc.)
 └── audio/
     ├── bgm/      # background music
     └── se/       # sound effects
 ```
 
-**The structure is fixed.** The engine scans these directories.
+**The directory names matter.** The engine scans these directories; subdirectories work too
+(`assets/bg/chapter1/village.png` → sprite name `chapter1_village`).
+
+> Early docs said `assets/char/`. The engine still accepts that name, but only when
+> `character/` does not exist — renaming is recommended.
 
 ### Textbox background
 
@@ -181,7 +192,7 @@ Drop an image into `assets/bg/`, say `village.png`. Add to your script:
 
 ### Add a character sprite
 
-Drop a PNG into `assets/char/`, say `alice.png`. Add:
+Drop a PNG into `assets/character/`, say `alice.png`. Add:
 
 ```
 @show alice at 0.55 0.10 0.40 0.85
@@ -225,10 +236,58 @@ Drop a song into `assets/audio/bgm/`, say `main.mp3`. Add:
 **While the game is running**, edit `script.tsn` or `config.toml`, save, and **the game updates instantly**.
 
 - Change a line of dialogue → screen updates instantly
-- Change a color → updates instantly
+- Change a color, position or font size → updates instantly
 - Add a `@choice` option → visible the next time you reach it
 
+**A broken script won't crash the game — and won't leave you staring at a black screen.**
+The window shows a red error page telling you **which file and which line** is wrong:
+
+```
+timesnow —— 剧本有问题，游戏已暂停
+
+chapters/ch2.tsn:9:1
+  @jump edn
+  ^
+  块 'ex' 引用了不存在的块 'edn'
+
+改好之后会自动继续，不用重启。
+```
+
+Fix the script, save, and the game keeps going — no restart. Errors are printed to the console too,
+if you'd rather watch the terminal.
+
+**New images and audio need a restart.** Assets are scanned once at startup.
+
 **Only Rust code changes require a rebuild.**
+
+## Check your script without running it: `--check`
+
+No window, no GPU:
+
+```bash
+cargo run -- --check
+```
+
+It does four things:
+
+- Parses the script (every `@include`d file) and reports errors with **exact file:line:column**
+- Verifies every `@jump` / `@if` / `@choice` target block exists
+- Verifies referenced backgrounds / sprites / BGM / SFX exist under `assets/`
+- Flags variables that are read but never set (those branches can never be taken)
+
+Exits with code `1` when there are errors, so it drops straight into CI:
+
+```
+$ cargo run -- --check
+error chapters/ch2.tsn:4: 块 'ex' 引用了不存在的块 'edn'
+      @jump edn
+warning script.tsn: 引用了不存在的背景 'missing_bg'：assets 里没有同名文件
+
+1 个错误，1 个警告。
+```
+
+Assets you simply haven't made yet are reported as **warnings**, so they don't block you.
+
 
 ## FAQ
 
@@ -249,8 +308,11 @@ Your system lacks a CJK font. Install one (like Source Han Sans), or test with E
 The console will print `sprite 不存在: xxx`. Check:
 
 - Filename matches the name used in `@scene` / `@show`
-- File is in the right subdirectory (`bg/`, `char/`, `ui/`)
+- File is in the right subdirectory (`bg/`, `character/`, `ui/`)
 - Extension is PNG (others work too, but PNG is the safest)
+- The file is new — assets added while the game runs need a restart
+
+A corrupt image logs `纹理解码失败，已跳过: xxx` and is skipped; everything else still loads.
 
 ### Where's the save file?
 

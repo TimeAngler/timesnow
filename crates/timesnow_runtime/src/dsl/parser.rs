@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use super::error::ParseError;
-use super::lexer::{lex_file, Line, Token};
+use super::lexer::{Line, Token, lex_file};
 use crate::script::{ChoiceOption, Cond, ScriptFile, Step, Value};
+use std::collections::HashMap;
 
 pub fn parse(input: &str) -> Result<ScriptFile, ParseError> {
     let lines = lex_file(input)?;
@@ -38,7 +38,7 @@ impl Parser {
                         column: 1,
                         message: "顶层只能出现 :: name 块定义".into(),
                         snippet: line.raw.clone(),
-                    })
+                    });
                 }
             };
             let indent = line.indent;
@@ -61,19 +61,25 @@ impl Parser {
             self.block_order.push(name);
         }
 
-        let start = self.block_order.first().cloned().ok_or_else(|| ParseError {
-            line: 1,
-            column: 1,
-            message: "脚本里没有任何块".into(),
-            snippet: String::new(),
-        })?;
+        let start = self
+            .block_order
+            .first()
+            .cloned()
+            .ok_or_else(|| ParseError {
+                line: 1,
+                column: 1,
+                message: "脚本里没有任何块".into(),
+                snippet: String::new(),
+            })?;
 
-        Ok(ScriptFile { start, blocks: self.blocks })
+        Ok(ScriptFile {
+            start,
+            blocks: self.blocks,
+        })
     }
 
     /// 解析缩进级别恰为 `indent` 的一串指令，直到遇到更小缩进、块定义、或文件结束。
-    fn parse_block_body(&mut self, indent: usize, out: &mut Vec<Step>)
-        -> Result<(), ParseError> {
+    fn parse_block_body(&mut self, indent: usize, out: &mut Vec<Step>) -> Result<(), ParseError> {
         while self.pos < self.lines.len() {
             let line = &self.lines[self.pos];
             if line.indent < indent {
@@ -98,8 +104,12 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_step_line(&mut self, line: &Line, indent: usize, out: &mut Vec<Step>)
-        -> Result<(), ParseError> {
+    fn parse_step_line(
+        &mut self,
+        line: &Line,
+        indent: usize,
+        out: &mut Vec<Step>,
+    ) -> Result<(), ParseError> {
         let directive = match line.tokens.first() {
             Some(Token::Directive(n)) => n.clone(),
             _ => {
@@ -108,7 +118,7 @@ impl Parser {
                     column: line.indent + 1,
                     message: "期望 @指令".into(),
                     snippet: line.raw.clone(),
-                })
+                });
             }
         };
 
@@ -118,13 +128,19 @@ impl Parser {
                 out.push(Step::Say { speaker, text });
             }
             "jump" => {
-                out.push(Step::Jump { target: parse_ident(&line.tokens[1..], line)? });
+                out.push(Step::Jump {
+                    target: parse_ident(&line.tokens[1..], line)?,
+                });
             }
             "scene" => {
-                out.push(Step::Scene { background: parse_ident(&line.tokens[1..], line)? });
+                out.push(Step::Scene {
+                    background: parse_ident(&line.tokens[1..], line)?,
+                });
             }
             "hide" => {
-                out.push(Step::Hide { sprite: parse_ident(&line.tokens[1..], line)? });
+                out.push(Step::Hide {
+                    sprite: parse_ident(&line.tokens[1..], line)?,
+                });
             }
             "show" => {
                 out.push(parse_show(&line.tokens[1..], line)?);
@@ -155,22 +171,27 @@ impl Parser {
                             column: line.indent + 1,
                             message: format!("@fade 期望 `to`，得到 {other:?}"),
                             snippet: line.raw.clone(),
-                        })
+                        });
                     }
                 }
                 let to = parse_float(&line.tokens[1..], 1, line)?;
                 let duration = parse_float(&line.tokens[1..], 2, line)?;
-                out.push(Step::Fade { to: to as f32, duration: duration as f32 });
+                out.push(Step::Fade {
+                    to: to as f32,
+                    duration: duration as f32,
+                });
             }
             "play" => {
                 let channel = match expect_token(&line.tokens[1..], 0, line, "通道名")? {
                     Token::Ident(s) => s.clone(),
-                    other => return Err(ParseError {
-                        line: line.number,
-                        column: line.indent + 1,
-                        message: format!("@play 期望通道名，得到 {other:?}"),
-                        snippet: line.raw.clone(),
-                    }),
+                    other => {
+                        return Err(ParseError {
+                            line: line.number,
+                            column: line.indent + 1,
+                            message: format!("@play 期望通道名，得到 {other:?}"),
+                            snippet: line.raw.clone(),
+                        });
+                    }
                 };
                 let name = match expect_token(&line.tokens[1..], 1, line, "音频名")? {
                     Token::Ident(s) => s.clone(),
@@ -180,7 +201,7 @@ impl Parser {
                             column: line.indent + 1,
                             message: format!("@play 期望音频名，得到 {other:?}"),
                             snippet: line.raw.clone(),
-                        })
+                        });
                     }
                 };
                 out.push(Step::Play { channel, name });
@@ -194,7 +215,7 @@ impl Parser {
                             column: line.indent + 1,
                             message: format!("@stop 期望通道名，得到 {other:?}"),
                             snippet: line.raw.clone(),
-                        })
+                        });
                     }
                 };
                 out.push(Step::Stop { channel });
@@ -205,15 +226,19 @@ impl Parser {
                     column: line.indent + 2,
                     message: format!("未知指令 @{other}"),
                     snippet: line.raw.clone(),
-                })
+                });
             }
         }
 
         Ok(())
     }
 
-    fn parse_if(&mut self, if_line: &Line, indent: usize, out: &mut Vec<Step>)
-        -> Result<(), ParseError> {
+    fn parse_if(
+        &mut self,
+        if_line: &Line,
+        indent: usize,
+        out: &mut Vec<Step>,
+    ) -> Result<(), ParseError> {
         let cond = parse_cond(&if_line.tokens[1..], if_line)?;
 
         // 探测 then 块的缩进
@@ -241,13 +266,12 @@ impl Parser {
         let mut else_steps = Vec::new();
         if self.pos < self.lines.len() {
             let next = &self.lines[self.pos];
-            if next.indent == indent {
-                if let Some(Token::Directive(d)) = next.tokens.first() {
-                    if d == "else" {
-                        self.pos += 1;
-                        self.parse_block_body(child_indent, &mut else_steps)?;
-                    }
-                }
+            if next.indent == indent
+                && let Some(Token::Directive(d)) = next.tokens.first()
+                && d == "else"
+            {
+                self.pos += 1;
+                self.parse_block_body(child_indent, &mut else_steps)?;
             }
         }
 
@@ -261,10 +285,14 @@ impl Parser {
         let after_name = format!("__if_{id}_after");
 
         if !ends_with_terminator(&then_steps) {
-            then_steps.push(Step::Jump { target: after_name.clone() });
+            then_steps.push(Step::Jump {
+                target: after_name.clone(),
+            });
         }
         if !ends_with_terminator(&else_steps) {
-            else_steps.push(Step::Jump { target: after_name.clone() });
+            else_steps.push(Step::Jump {
+                target: after_name.clone(),
+            });
         }
 
         self.blocks.insert(then_name.clone(), then_steps);
@@ -354,9 +382,7 @@ fn parse_ident(tokens: &[Token], line: &Line) -> Result<String, ParseError> {
 fn parse_say(tokens: &[Token], line: &Line) -> Result<(Option<String>, String), ParseError> {
     match tokens {
         [Token::Str(text)] => Ok((None, text.clone())),
-        [Token::Ident(speaker), Token::Str(text)] => {
-            Ok((Some(speaker.clone()), text.clone()))
-        }
+        [Token::Ident(speaker), Token::Str(text)] => Ok((Some(speaker.clone()), text.clone())),
         _ => Err(ParseError {
             line: line.number,
             column: line.indent + 1,
@@ -375,7 +401,7 @@ fn parse_show(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望 sprite 名，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     };
 
@@ -388,7 +414,7 @@ fn parse_show(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
                 column: line.indent + 1,
                 message: format!("@show 期望 `at` 关键字，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     }
 
@@ -415,7 +441,7 @@ fn parse_set(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望变量名，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     };
 
@@ -427,7 +453,7 @@ fn parse_set(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望 `=`，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     }
 
@@ -449,7 +475,7 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望选项文本，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     };
 
@@ -461,7 +487,7 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望 `->`，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     }
 
@@ -473,7 +499,7 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望跳转目标，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     };
 
@@ -489,7 +515,7 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                         column: line.indent + 1,
                         message: format!("期望变量名，得到 {other:?}"),
                         snippet: line.raw.clone(),
-                    })
+                    });
                 }
             };
             i += 1;
@@ -502,7 +528,7 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                         column: line.indent + 1,
                         message: format!("期望 `=`，得到 {other:?}"),
                         snippet: line.raw.clone(),
-                    })
+                    });
                 }
             }
 
@@ -522,14 +548,13 @@ fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
                         column: line.indent + 1,
                         message: format!("期望 `,` 或 `}}`，得到 {other:?}"),
                         snippet: line.raw.clone(),
-                    })
+                    });
                 }
             }
         }
     }
 
     Ok(ChoiceOption { text, target, set })
-
 }
 
 // ---------- 条件表达式 ----------
@@ -545,7 +570,6 @@ fn parse_cond(tokens: &[Token], line: &Line) -> Result<Cond, ParseError> {
         });
     }
     Ok(cond)
-
 }
 
 struct Cursor<'a> {
@@ -629,7 +653,7 @@ fn parse_comparison(cur: &mut Cursor, line: &Line) -> Result<Cond, ParseError> {
                 column: line.indent + 1,
                 message: format!("期望变量名，得到 {other:?}"),
                 snippet: line.raw.clone(),
-            })
+            });
         }
     };
 
@@ -637,26 +661,44 @@ fn parse_comparison(cur: &mut Cursor, line: &Line) -> Result<Cond, ParseError> {
     match cur.peek() {
         Some(Token::EqEq) => {
             cur.next();
-            Ok(Cond::Eq { name, value: parse_value(cur.next(), line)? })
+            Ok(Cond::Eq {
+                name,
+                value: parse_value(cur.next(), line)?,
+            })
         }
         Some(Token::Ne) => {
             cur.next();
-            Ok(Cond::Ne { name, value: parse_value(cur.next(), line)? })
+            Ok(Cond::Ne {
+                name,
+                value: parse_value(cur.next(), line)?,
+            })
         }
         Some(Token::Gt) => {
             cur.next();
-            Ok(Cond::Gt { name, value: parse_value(cur.next(), line)? })
+            Ok(Cond::Gt {
+                name,
+                value: parse_value(cur.next(), line)?,
+            })
         }
         Some(Token::Lt) => {
             cur.next();
-            Ok(Cond::Lt { name, value: parse_value(cur.next(), line)? })
+            Ok(Cond::Lt {
+                name,
+                value: parse_value(cur.next(), line)?,
+            })
         }
-        Some(Token::Ge) | Some(Token::Le) => {
-            return Err(ParseError {
-                line: line.number,
-                column: line.indent + 1,
-                message: ">= 和 <= 暂未支持，请用 > 或 < 配合 not".into(),
-                snippet: line.raw.clone(),
+        Some(Token::Ge) => {
+            cur.next();
+            Ok(Cond::Ge {
+                name,
+                value: parse_value(cur.next(), line)?,
+            })
+        }
+        Some(Token::Le) => {
+            cur.next();
+            Ok(Cond::Le {
+                name,
+                value: parse_value(cur.next(), line)?,
             })
         }
         _ => Ok(Cond::Truthy { name }),

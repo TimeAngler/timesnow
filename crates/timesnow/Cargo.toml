@@ -8,3 +8,4 @@ license.workspace = true
 timesnow_runtime = { path = "../timesnow_runtime" }
 timesnow_render = { path = "../timesnow_render" }
 timesnow_audio = { path = "../timesnow_audio" }
+anyhow = "1"

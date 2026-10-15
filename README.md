@@ -46,6 +46,15 @@ Then:
 cargo run
 ```
 
+Check your script without opening a window (good for CI):
+
+```bash
+cargo run -- --check
+```
+
+It prints errors with exact `file:line:column` — missing blocks, bad syntax, and assets the script
+references but `assets/` doesn't have. Exits non-zero on errors.
+
 ## Examples
 
 - [`examples/minimal`](examples/minimal) — smallest runnable project
@@ -86,7 +95,7 @@ my_game/
 ├── config.toml
 └── assets/
     ├── bg/                  # backgrounds
-    ├── char/                # character sprites
+    ├── character/           # character sprites
     ├── ui/                  # UI elements (textbox, etc.)
     └── audio/
         ├── bgm/
@@ -117,4 +126,4 @@ Early project. **API may change.** It runs a full short visual novel — from ti
 
 MIT
 
-See [`docs/getting-started.md`](docs/getting-started.en.md).
+See the getting started guide: [English](docs/getting-started.en.md) | [中文](docs/getting-started.md).

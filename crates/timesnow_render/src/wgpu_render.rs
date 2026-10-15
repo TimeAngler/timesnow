@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::sprite::{Rect, SpriteRenderer};
 use crate::text::TextRenderer;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::sync::Arc;
 
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -17,41 +17,37 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    pub fn new<W>(window: Arc<W>, width: u32, height: u32, font_size: f32, line_height: f32,) -> Self
+    pub fn new<W>(window: Arc<W>, width: u32, height: u32, font_size: f32, line_height: f32) -> Self
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::PRIMARY,
-                flags: Default::default(),
-                memory_budget_thresholds: Default::default(),
-                backend_options: Default::default(),
-                display: None,
-            }
-        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            flags: Default::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
 
         let surface = instance
             .create_surface(window.clone())
             .expect("Failed to create surface");
 
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            }
-        )).expect("Failed to create adapter");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("Failed to create adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("timesnow device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            },
-        )).expect("Failed to create device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("timesnow device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .expect("Failed to create device");
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -132,13 +128,15 @@ impl WgpuRenderer {
             }
         };
 
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
-            }
-        );
+            });
 
         self.sprite.begin_frame();
         if let Some(bg) = &self.background {
@@ -185,7 +183,6 @@ impl WgpuRenderer {
 
             self.sprite.draw(&mut pass);
             self.text.render(&mut pass);
-
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -198,6 +195,24 @@ impl WgpuRenderer {
 
     pub fn add_text(&mut self, text: &str, x: f32, y: f32, scale: f32, color: (u8, u8, u8)) {
         self.text.add(text, x, y, scale, color);
+    }
+
+    /// 带最大宽度的版本：文本超过 `max_width`（像素）时换行。
+    pub fn add_text_wrapped(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: (u8, u8, u8),
+        max_width: f32,
+    ) {
+        self.text.add_wrapped(text, x, y, scale, color, max_width);
+    }
+
+    /// 调试/错误页文字（带描边），压在任何背景上都看得清。
+    pub fn add_debug_text(&mut self, text: &str, x: f32, y: f32, scale: f32, color: (u8, u8, u8)) {
+        self.text.add_debug(text, x, y, scale, color);
     }
 
     pub fn load_sprite(&mut self, name: &str, bytes: &[u8]) {
@@ -235,5 +250,4 @@ impl WgpuRenderer {
     pub fn update_font_config(&mut self, font_size: f32, line_height: f32) {
         self.text.set_font_metrics(font_size, line_height);
     }
-
 }
