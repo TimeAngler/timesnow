@@ -165,6 +165,7 @@ crates/
 - [DSL 语法参考](docs/dsl.md) · [DSL reference](docs/dsl.en.md)
 - [设计愿景](docs/vision.md) —— 为什么做这个，以及**刻意不做什么**
 - [路线图](docs/roadmap.md) —— 接下来做什么，按什么顺序
+- [设计笔记](docs/notes.md) —— 给作者自己看的：为什么这么定，以及**哪些判断被证伪过**
 
 ## License
 
