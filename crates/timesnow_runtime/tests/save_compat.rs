@@ -12,9 +12,16 @@
 //! - `Value` 从带 tag 的 `Int(10)` 改成 untagged 的 `10` → 老文件读不出来
 //!   （v1 夹具就是这么写的，这条是有意保留的历史形态）
 //! - 新增字段却没给默认值 → 老存档缺这个字段就报错
+//!
+//! 后半部分（`完整链路`）**不止步于"能反序列化"**：它把老存档真的放进
+//! 一个项目目录，让引擎走 `Script::load` + `saves::read_slot` + `apply_save`
+//! 这一整条路。反序列化通过但读档路径炸掉，是这两种测试的区别。
 
+use std::path::PathBuf;
+
+use timesnow_runtime::config::Config;
 use timesnow_runtime::program::SaveData;
-use timesnow_runtime::script::Value;
+use timesnow_runtime::script::{Script, Value};
 
 /// 最初的存档格式：只有 4 个字段，没有版本号、没有指纹。
 ///
@@ -206,4 +213,161 @@ fn every_field_is_covered() {
         12,
         "SaveData 的字段数变了——请同步更新这份清单和 save_v2_full.ron"
     );
+}
+
+// ---------- 完整链路：真的让引擎加载一个老存档 ----------
+//
+// 上面那些只证明"能反序列化"。这一节证明**读档这条路整条是通的**：
+// 老存档放进项目目录 → `Script::load` → `saves::read_slot` → `apply_save`
+// → 变量、位置、舞台回到游戏里。
+//
+// 为什么非要这一层：反序列化通过、读档路径炸掉，是完全可能的
+// （字段缺失、位置对不上、`Value` 的形态变了之后运算崩）。这次修 v1
+// 兼容时就该有这条。
+
+fn fresh_project(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tsn_compat_{tag}_{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("saves")).unwrap();
+    dir
+}
+
+/// 夹具里的 `current_block` 是 `title`、`current_step` 是 3，
+/// 所以剧本得真的有这个块、而且那个位置是句台词（不然定位对不上）。
+const MATCHING_SCRIPT: &str = "\
+:: title
+@scene lake
+@say \"序 · 三周\"
+@say \"被裁掉的那天。\"
+@say \"三周过去了。\"
+@say \"我开始想，这到底是谁的问题。\"
+@say \"或许该试试打电话。\"
+@jump ch1
+
+:: ch1
+@set 好感 = 0
+@say \"第一个电话。\"
+";
+
+/// **端到端**：一份含变量的 v1 存档，从磁盘一路读到游戏状态里。
+#[test]
+fn a_real_v1_save_loads_through_the_whole_pipeline() {
+    let dir = fresh_project("v1_pipeline");
+
+    std::fs::write(dir.join("script.tsn"), MATCHING_SCRIPT).unwrap();
+    // 老存档放在 saves/slot1.ron，走正常的槽位读取
+    std::fs::write(dir.join("saves/slot1.ron"), V1_MINIMAL).unwrap();
+
+    let config = Config::default();
+    let mut script = Script::load(&dir.join("script.tsn"), &config).expect("剧本应当能加载");
+
+    // 读档前：变量是空的，位置在开头
+    assert_eq!(script.block(), "title");
+    assert!(script.backlog().is_empty());
+
+    // 真的走 read_slot + apply_save 这条路
+    let data = timesnow_runtime::saves::read_slot(&dir, 1).expect("v1 存档应当能从槽位读出来");
+    let notice = script.apply_save(data);
+
+    // 老存档没记指纹，所以会报"剧本改动过"——这是预期的
+    assert!(
+        notice.is_some(),
+        "v1 存档没有指纹，读进来应当提示按文本重新定位"
+    );
+
+    // **变量必须回来**（这就是这次修的 bug 的可见后果：
+    // 带 tag 的 Int(10) 读不出来时，这里会是空的）
+    assert_eq!(
+        script.vars().get("好感"),
+        Some(&Value::Int(10)),
+        "老存档里的变量丢了"
+    );
+    assert_eq!(
+        script.vars().get("打过电话"),
+        Some(&Value::Bool(true)),
+        "老存档里的布尔变量丢了"
+    );
+
+    // 舞台也要回来
+    assert_eq!(
+        script.current_stage().background.as_deref(),
+        Some("lake"),
+        "老存档里的背景丢了"
+    );
+    assert_eq!(
+        script.current_stage().characters.len(),
+        1,
+        "老存档里的立绘丢了"
+    );
+
+    // 位置：指纹对不上 → 按台词文本重新定位。档里没有 step_text，
+    // 所以退回本段开头，但**必须在 title 块里**，不能跑到别的块去。
+    assert_eq!(script.block(), "title", "位置应当落在存档记的那个块里");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 老存档读过之后能接着玩：往前走、变量还能用。
+///
+/// 只验证"读进来"是不够的——读进来的状态要能继续驱动剧本，
+/// 否则玩家看到的是读档成功然后卡住。
+#[test]
+fn play_continues_after_loading_a_v1_save() {
+    let dir = fresh_project("v1_play_on");
+
+    std::fs::write(dir.join("script.tsn"), MATCHING_SCRIPT).unwrap();
+    std::fs::write(dir.join("saves/slot1.ron"), V1_MINIMAL).unwrap();
+
+    let config = Config::default();
+    let mut script = Script::load(&dir.join("script.tsn"), &config).unwrap();
+    let data = timesnow_runtime::saves::read_slot(&dir, 1).unwrap();
+    script.apply_save(data);
+
+    // 一直往前推，应当能走到下一块而不 panic、不卡住
+    for _ in 0..12 {
+        script.skip_typewriter();
+        script.advance();
+    }
+    assert_eq!(script.block(), "ch1", "读档之后应当能继续推进到后面的块");
+
+    // 而且读档带过来的变量还能参与运算（这是 Value 形态最容易被弄坏的地方）
+    script.skip_typewriter();
+    script.advance();
+    script.skip_typewriter();
+    script.advance();
+    assert_eq!(
+        script.vars().get("好感"),
+        Some(&Value::Int(0)),
+        "ch1 里的 @set 应当覆盖掉老存档里那个值"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 项目根目录的 `save.ron`（更早的存档位置）也要能当 1 号槽读出来。
+///
+/// 这条走的是另一条路径：`saves::read_slot` 在 `saves/` 为空时会回退到
+/// 根目录的 `save.ron`。老玩家的档就在那儿。
+#[test]
+fn the_oldest_save_location_still_works_end_to_end() {
+    let dir = fresh_project("legacy_root");
+
+    std::fs::write(dir.join("script.tsn"), MATCHING_SCRIPT).unwrap();
+    // 注意：放根目录，不是 saves/
+    std::fs::write(dir.join("save.ron"), V1_MINIMAL).unwrap();
+
+    let data =
+        timesnow_runtime::saves::read_slot(&dir, 1).expect("根目录的 save.ron 应当被当成 1 号槽");
+    assert_eq!(
+        data.vars.get("好感"),
+        Some(&Value::Int(10)),
+        "根目录老存档里的变量也该读出来"
+    );
+
+    // 而且槽位列表里要显示成"1 号槽有东西"
+    let slots = timesnow_runtime::saves::list_slots(&dir);
+    assert!(slots[0].exists, "1 号槽应当显示为已占用");
+    assert_eq!(slots[0].chapter, None, "v1 没有章节标签");
+
+    std::fs::remove_dir_all(&dir).ok();
 }

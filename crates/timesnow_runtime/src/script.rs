@@ -606,6 +606,17 @@ impl Script {
         self.vm.stage()
     }
 
+    /// 当前的剧本变量。
+    ///
+    /// `Vm` 上有同样的方法，但 `Script` 之前没有把它转出来——
+    /// 于是测试只能靠 `script.vm.vars()` 去够私有字段，而那条路外部走不通。
+    ///
+    /// 对作者来说这也是有用的：DSL 里能读变量，但宿主代码（自定义 UI、
+    /// 调试面板）想看一眼当前的好感度、旗帜，得有个正经入口。
+    pub fn vars(&self) -> &HashMap<String, Value> {
+        self.vm.vars()
+    }
+
     pub fn current_alpha(&self) -> f32 {
         self.presentation.current_alpha
     }
