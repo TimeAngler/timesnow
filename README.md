@@ -166,6 +166,7 @@ endings — but it's still exploratory. Issues and PRs welcome.
 - [Getting started](docs/getting-started.en.md) · [快速开始](docs/getting-started.md)
 - [DSL reference](docs/dsl.en.md) · [DSL 语法参考](docs/dsl.md)
 - [Design vision](docs/vision.md) (中文) — why this exists, what it deliberately doesn't do
+- [Roadmap](docs/roadmap.md) (中文) — what gets built next, and in what order
 
 ## License
 
