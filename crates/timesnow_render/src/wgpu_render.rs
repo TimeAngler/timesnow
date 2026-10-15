@@ -14,6 +14,8 @@ pub struct WgpuRenderer {
     background: Option<String>,
     characters: Vec<(String, Rect)>,
     ui: Vec<(String, Rect)>,
+    /// 带着色的 UI 块（名字, 位置, tint）。在普通 UI 之后画，作为覆盖层。
+    ui_tinted: Vec<(String, Rect, [f32; 3])>,
 }
 
 impl WgpuRenderer {
@@ -84,6 +86,7 @@ impl WgpuRenderer {
             background: None,
             characters: Vec::new(),
             ui: Vec::new(),
+            ui_tinted: Vec::new(),
         }
     }
 
@@ -148,6 +151,11 @@ impl WgpuRenderer {
         for (name, rect) in &self.ui {
             self.sprite.queue(name, *rect);
         }
+        // 带着色的覆盖层最后画（底、遮罩、槽位框）
+        for (name, rect, tint) in &self.ui_tinted {
+            self.sprite.queue_tinted(name, *rect, *tint);
+        }
+        self.sprite.reset_tint();
 
         self.sprite.upload(&self.queue);
 
@@ -191,6 +199,12 @@ impl WgpuRenderer {
 
     pub fn add_ui(&mut self, name: &str, rect: Rect) {
         self.ui.push((name.to_string(), rect));
+    }
+
+    /// 带颜色的 UI 块（铺一张白纹理 + tint）。用不着资源文件，画的是纯色。
+    pub fn add_ui_tinted(&mut self, name: &str, rect: Rect, tint: (f32, f32, f32)) {
+        self.ui_tinted
+            .push((name.to_string(), rect, [tint.0, tint.1, tint.2]));
     }
 
     pub fn add_text(&mut self, text: &str, x: f32, y: f32, scale: f32, color: (u8, u8, u8)) {
@@ -255,6 +269,7 @@ impl WgpuRenderer {
 
     pub fn clear_ui(&mut self) {
         self.ui.clear();
+        self.ui_tinted.clear();
     }
 
     pub fn clear_text(&mut self) {

@@ -96,6 +96,14 @@ struct TextureEntry {
     bind_group: wgpu::BindGroup,
 }
 
+/// 一个待绘制的 sprite 实例
+struct Instance {
+    name: String,
+    rect: Rect,
+    /// 着色。铺一张白纹理 + tint 就等于画纯色块（UI 底色用）。
+    tint: [f32; 3],
+}
+
 pub struct SpriteRenderer {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -106,7 +114,7 @@ pub struct SpriteRenderer {
     transform_bind_group: wgpu::BindGroup,
 
     textures: HashMap<String, TextureEntry>,
-    instances: Vec<(String, Rect)>,
+    instances: Vec<Instance>,
 
     /// 本帧已经提示过的缺失 sprite 名（同一帧里一个名字只提示一次）
     reported_missing: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -114,6 +122,8 @@ pub struct SpriteRenderer {
     warned_missing: std::cell::RefCell<std::collections::HashSet<String>>,
 
     global_alpha: f32,
+    /// 下一批 `queue_tinted` 用的颜色
+    next_tint: [f32; 3],
 }
 
 impl SpriteRenderer {
@@ -245,6 +255,7 @@ impl SpriteRenderer {
             reported_missing: std::cell::RefCell::new(std::collections::HashSet::new()),
             warned_missing: std::cell::RefCell::new(std::collections::HashSet::new()),
             global_alpha: 1.0,
+            next_tint: [1.0, 1.0, 1.0],
         }
     }
 
@@ -329,21 +340,35 @@ impl SpriteRenderer {
     }
 
     pub fn queue(&mut self, name: &str, rect: Rect) {
+        let tint = self.next_tint;
+        self.queue_with(name, rect, tint);
+    }
+
+    /// 带着色的绘制。铺一张白纹理 + tint 就等于纯色块（UI 底、遮罩用）。
+    pub fn queue_tinted(&mut self, name: &str, rect: Rect, tint: [f32; 3]) {
+        self.queue_with(name, rect, tint);
+    }
+
+    fn queue_with(&mut self, name: &str, rect: Rect, tint: [f32; 3]) {
         if self.instances.len() >= MAX_INSTANCES {
             eprintln!("超过最大 sprite 数 {MAX_INSTANCES}");
             return;
         }
-        self.instances.push((name.to_string(), rect));
+        self.instances.push(Instance {
+            name: name.to_string(),
+            rect,
+            tint,
+        });
     }
 
     /// 把所有实例的 transform 一次性写入共享 buffer。在 pass 之前调用。
     /// 顺带报告缺失的 sprite：放在这里而不是 `draw` 里，是为了不用 `&mut self`
     /// （`draw` 期间的借用无法可变）。
     pub fn upload(&self, queue: &wgpu::Queue) {
-        for (i, (name, rect)) in self.instances.iter().enumerate() {
+        for (i, inst) in self.instances.iter().enumerate() {
             let transform = TransformUniform {
-                rect: [rect.x, rect.y, rect.width, rect.height],
-                params: [self.global_alpha, 0.0, 0.0, 0.0],
+                rect: [inst.rect.x, inst.rect.y, inst.rect.width, inst.rect.height],
+                params: [self.global_alpha, inst.tint[0], inst.tint[1], inst.tint[2]],
             };
             let offset = i as u64 * INSTANCE_ALIGN;
             queue.write_buffer(
@@ -353,11 +378,11 @@ impl SpriteRenderer {
             );
 
             // 缺失提示：一个名字整个进程只报一次，不刷屏
-            if !self.textures.contains_key(name)
-                && self.reported_missing.borrow_mut().insert(name.clone())
-                && self.warned_missing.borrow_mut().insert(name.clone())
+            if !self.textures.contains_key(&inst.name)
+                && self.reported_missing.borrow_mut().insert(inst.name.clone())
+                && self.warned_missing.borrow_mut().insert(inst.name.clone())
             {
-                eprintln!("sprite 不存在: {name}");
+                eprintln!("sprite 不存在: {}", inst.name);
             }
         }
     }
@@ -367,8 +392,8 @@ impl SpriteRenderer {
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-        for (i, (name, _)) in self.instances.iter().enumerate() {
-            let Some(entry) = self.textures.get(name) else {
+        for (i, inst) in self.instances.iter().enumerate() {
+            let Some(entry) = self.textures.get(&inst.name) else {
                 continue;
             };
             let offset = (i as u64 * INSTANCE_ALIGN) as u32;
@@ -380,5 +405,14 @@ impl SpriteRenderer {
 
     pub fn set_alpha(&mut self, alpha: f32) {
         self.global_alpha = alpha.clamp(0.0, 1.0);
+    }
+
+    /// 设置后续 `queue` 使用的 tint（默认白色 = 不着色）
+    pub fn set_tint(&mut self, tint: [f32; 3]) {
+        self.next_tint = tint;
+    }
+
+    pub fn reset_tint(&mut self) {
+        self.next_tint = [1.0, 1.0, 1.0];
     }
 }

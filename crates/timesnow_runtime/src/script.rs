@@ -119,6 +119,10 @@ pub enum Step {
     Hide {
         sprite: String,
     },
+    /// 标记"从这里开始是第几章"。不影响画面，只是给存档一个可读的标签。
+    Chapter {
+        label: String,
+    },
     Wait {
         duration: f32,
     },
@@ -148,6 +152,7 @@ impl Step {
             Step::Scene { .. } => "scene",
             Step::Show { .. } => "show",
             Step::Hide { .. } => "hide",
+            Step::Chapter { .. } => "chapter",
             Step::Wait { .. } => "wait",
             Step::Clear => "clear",
             Step::Fade { .. } => "fade",
@@ -172,6 +177,19 @@ pub struct ChoiceLayout {
     /// 选项组整体的垂直中心（归一化），默认 0.5 = 屏幕正中
     pub y_center: f32,
 }
+
+/// 回看历史里的一条。
+///
+/// 记的是**玩家当时看到的那句话**（变量已经展开），所以它由 `Script` 在显示的
+/// 时刻压进来，而不是 `Vm` 自己在跑 step 的时候记。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub speaker: Option<String>,
+    pub text: String,
+}
+
+/// 回看历史上限。再多也没人翻，还会让存档变大。
+pub const BACKLOG_LIMIT: usize = 200;
 
 pub enum AudioEvent {
     PlayBgm(String),
@@ -210,6 +228,10 @@ pub struct Vm {
     audio_events: Vec<AudioEvent>,
     /// `@fade` 时长为 0 时要立刻应用的 alpha，由表现层取走
     pending_alpha: Option<f32>,
+    /// 回看历史（玩家已经翻过去的那几句）
+    backlog: Vec<HistoryEntry>,
+    /// 最近的 `@chapter` 标签，存档时带上
+    chapter: Option<String>,
 }
 
 impl Vm {
@@ -224,12 +246,47 @@ impl Vm {
             pending_choice: None,
             audio_events: Vec::new(),
             pending_alpha: None,
+            backlog: Vec::new(),
+            chapter: None,
         }
     }
 
     /// 取走"要立刻生效的 alpha"（瞬时 `@fade` 留下的）
     pub fn take_pending_alpha(&mut self) -> Option<f32> {
         self.pending_alpha.take()
+    }
+
+    // ---------- 回看历史 ----------
+
+    /// 压一条进回看历史。由 `Script` 在"这句要翻页了"的时刻调用，
+    /// 传进来的已经是展开过变量的文本。
+    pub fn push_history(&mut self, speaker: Option<String>, text: String) {
+        self.backlog.push(HistoryEntry { speaker, text });
+        // 超出上限就从最老的开始丢
+        if self.backlog.len() > BACKLOG_LIMIT {
+            let excess = self.backlog.len() - BACKLOG_LIMIT;
+            self.backlog.drain(..excess);
+        }
+    }
+
+    pub fn backlog(&self) -> &[HistoryEntry] {
+        &self.backlog
+    }
+
+    pub fn set_backlog(&mut self, backlog: Vec<HistoryEntry>) {
+        self.backlog = backlog;
+        if self.backlog.len() > BACKLOG_LIMIT {
+            let excess = self.backlog.len() - BACKLOG_LIMIT;
+            self.backlog.drain(..excess);
+        }
+    }
+
+    pub fn chapter(&self) -> Option<&str> {
+        self.chapter.as_deref()
+    }
+
+    pub fn set_chapter(&mut self, chapter: Option<String>) {
+        self.chapter = chapter;
     }
 
     pub fn block(&self) -> &str {
@@ -330,6 +387,10 @@ impl Vm {
                 }
                 Step::Hide { sprite } => {
                     self.stage.characters.retain(|(n, _)| n != &sprite);
+                    self.step += 1;
+                }
+                Step::Chapter { label } => {
+                    self.chapter = Some(label);
                     self.step += 1;
                 }
                 Step::Clear => {
@@ -799,6 +860,9 @@ impl Script {
 
     fn remember_last_say(&mut self) {
         if let Some(say) = self.current_say() {
+            // 回看历史记的是"玩家看到的那句"（变量已展开），
+            // 所以要在这里压栈——这是这句即将翻页的时刻。
+            self.vm.push_history(say.0.clone(), say.1.clone());
             self.last_say = Some(say);
         }
     }
@@ -878,7 +942,19 @@ impl Script {
             bgm,
             last_say: self.last_say.clone(),
             pending_choices: self.pending_choice_texts(),
+            chapter: self.vm.chapter().map(|s| s.to_string()),
+            backlog: self.vm.backlog().to_vec(),
         }
+    }
+
+    /// 回看历史（只读）
+    pub fn backlog(&self) -> &[HistoryEntry] {
+        self.vm.backlog()
+    }
+
+    /// 当前章节标签（`@chapter` 设的），存档界面显示用
+    pub fn chapter(&self) -> Option<&str> {
+        self.vm.chapter()
     }
 
     /// 当前停在选项上时，那组选项的文本（按显示顺序）
@@ -921,6 +997,8 @@ impl Script {
         self.last_say = data.last_say.clone();
         self.resumable_bgm = data.bgm.clone();
         self.bgm = data.bgm.clone();
+        self.vm.set_chapter(data.chapter.clone());
+        self.vm.set_backlog(data.backlog.clone());
 
         // 位置：指纹一致就直接用；否则按台词文本找回
         let same_script = data.script_fingerprint != 0
@@ -1475,6 +1553,127 @@ mod tests {
         assert_eq!(back.current_block, data.current_block);
         assert_eq!(back.bgm.as_deref(), Some("main"), "存档要记住在播的 BGM");
         assert_eq!(back.vars.get("n"), Some(&Value::Int(3)));
+    }
+
+    // ---------- 回看历史 ----------
+
+    /// 翻过去的那句才进历史；正在显示的那句不进
+    #[test]
+    fn backlog_records_lines_as_they_are_left() {
+        let mut s = script(":: start\n@say \"第一句\"\n@say \"第二句\"\n@say \"第三句\"\n");
+        assert!(s.backlog().is_empty(), "刚开始不该有历史");
+
+        s.update(1.0);
+        s.advance(); // 离开第一句
+        assert_eq!(s.backlog().len(), 1);
+        assert_eq!(s.backlog()[0].text, "第一句");
+        assert_eq!(s.backlog()[0].speaker, None);
+
+        s.update(1.0);
+        s.advance(); // 离开第二句
+        assert_eq!(s.backlog().len(), 2);
+        assert_eq!(s.backlog()[1].text, "第二句");
+        // 当前正在显示的第三句还没进历史
+        assert_eq!(s.current_full_text().as_deref(), Some("第三句"));
+        assert_eq!(s.backlog().len(), 2);
+    }
+
+    /// 历史里存的必须是**展开后**的文本，不是 `{name}` 模板
+    #[test]
+    fn backlog_stores_expanded_text() {
+        let mut s = script(
+            ":: start\n@set name = \"阿德里安\"\n@say 小雪 \"你好，{name}。\"\n@say \"下一句\"\n",
+        );
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        assert_eq!(s.backlog().len(), 1);
+        assert_eq!(s.backlog()[0].text, "你好，阿德里安。");
+        assert_eq!(s.backlog()[0].speaker.as_deref(), Some("小雪"));
+    }
+
+    /// 选项也算一次"翻页"，前面那句要进历史
+    #[test]
+    fn backlog_records_the_line_before_a_choice() {
+        let mut s =
+            script(":: start\n@say \"选一个\"\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n");
+        s.update(1.0);
+        s.advance(); // 走到选项
+        assert_eq!(s.backlog().len(), 1);
+        assert_eq!(s.backlog()[0].text, "选一个");
+    }
+
+    #[test]
+    fn backlog_is_capped_and_drops_the_oldest() {
+        let mut s = script(":: start\n@say \"起点\"\n@jump start\n");
+        for i in 0..(BACKLOG_LIMIT + 40) {
+            s.vm.push_history(None, format!("第 {i} 句"));
+        }
+        assert_eq!(s.backlog().len(), BACKLOG_LIMIT, "不能无限涨");
+        assert_eq!(
+            s.backlog()[0].text,
+            format!("第 {} 句", 40),
+            "超出上限应当从最老的开始丢"
+        );
+        assert_eq!(
+            s.backlog().last().unwrap().text,
+            format!("第 {} 句", BACKLOG_LIMIT + 39)
+        );
+    }
+
+    /// 读档后还能往回翻
+    #[test]
+    fn backlog_survives_save_and_load() {
+        let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        assert_eq!(s.backlog().len(), 2);
+
+        let data = s.save_data();
+        assert_eq!(data.backlog.len(), 2);
+
+        let mut fresh = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
+        fresh.apply_save(data);
+        assert_eq!(fresh.backlog().len(), 2, "读档后历史应当还在");
+        assert_eq!(fresh.backlog()[0].text, "甲");
+        assert_eq!(fresh.backlog()[1].text, "乙");
+    }
+
+    /// 旧存档没有 backlog 字段 → 空的，不报错
+    #[test]
+    fn legacy_save_has_empty_backlog() {
+        let s = script(":: start\n@say \"甲\"\n");
+        let mut data = s.save_data();
+        data.backlog.clear();
+        let mut fresh = script(":: start\n@say \"甲\"\n");
+        assert!(fresh.apply_save(data).is_none());
+        assert!(fresh.backlog().is_empty());
+    }
+
+    // ---------- @chapter ----------
+
+    #[test]
+    fn chapter_label_is_recorded_and_saved() {
+        let s = script(":: start\n@chapter \"第二章 · 湖边\"\n@say \"甲\"\n");
+        assert_eq!(s.chapter(), Some("第二章 · 湖边"));
+        let data = s.save_data();
+        assert_eq!(data.chapter.as_deref(), Some("第二章 · 湖边"));
+
+        let mut fresh = script(":: start\n@chapter \"第二章 · 湖边\"\n@say \"甲\"\n");
+        fresh.apply_save(data);
+        assert_eq!(fresh.chapter(), Some("第二章 · 湖边"));
+    }
+
+    /// 章节标签只影响存档信息，不该在屏幕上多显示什么
+    #[test]
+    fn chapter_step_does_not_change_what_is_on_screen() {
+        let mut s = script(":: start\n@chapter \"第一章\"\n@say \"甲\"\n");
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("甲"));
+        assert_eq!(s.current_speaker(), None);
     }
 
     /// 停在选项上存档 → 读档后应该回到同一组选项，而不是滑到别处

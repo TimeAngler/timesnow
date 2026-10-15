@@ -1,4 +1,6 @@
 /target
 **/save.ron
+# 存档槽位（运行时产物，不该进仓库）
+**/saves/
 .idea/
 .vscode/

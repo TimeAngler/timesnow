@@ -90,6 +90,12 @@ pub struct SaveData {
     /// 读档时和当前剧本里那组选项核对，数量或文本对不上就回退到本段开头。
     #[serde(default)]
     pub pending_choices: Option<ChoiceTexts>,
+    /// 最近的 `@chapter` 标签，用来在存读档界面显示"这是哪一章"
+    #[serde(default)]
+    pub chapter: Option<String>,
+    /// 回看历史。存进存档，读档后还能往回翻。
+    #[serde(default)]
+    pub backlog: Vec<crate::script::HistoryEntry>,
 }
 
 /// 剧本结构指纹：块名 + 每块 step 数量 + 每个 step 的类型标签。

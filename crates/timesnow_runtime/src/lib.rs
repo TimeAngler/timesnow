@@ -3,13 +3,15 @@ pub mod assets;
 pub mod config;
 pub mod dsl;
 pub mod program;
+pub mod saves;
 pub mod script;
 pub mod validate;
 
 pub use app::App;
 pub use config::Config;
 pub use program::{Fingerprint, Program, SAVE_VERSION, SaveData, SaveNotice};
-pub use script::{Outcome, Presentation, Script, Vm};
+pub use saves::{SLOT_COUNT, SlotInfo};
+pub use script::{HistoryEntry, Outcome, Presentation, Script, Vm};
 pub use validate::{Diagnostic, DiagnosticLevel, Report, validate};
 
 use std::path::Path;

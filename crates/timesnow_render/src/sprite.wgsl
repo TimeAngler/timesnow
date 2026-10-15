@@ -1,5 +1,6 @@
 struct Transform {
     rect: vec4<f32>,    // x, y, w, h（归一化 0~1，左上角原点）
+    // x = 全局 alpha；yzw = 着色（tint），默认 1,1,1
     params: vec4<f32>,
 };
 
@@ -38,5 +39,7 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c = textureSample(t_diffuse, s_diffuse, in.uv);
-    return vec4<f32>(c.rgb, c.a * transform.params.x);
+    // params.yzw 是 tint：铺一张白纹理 + tint 就等于纯色块。
+    // 普通 sprite 的 tint 保持 1,1,1，画面完全不变。
+    return vec4<f32>(c.rgb * transform.params.yzw, c.a * transform.params.x);
 }

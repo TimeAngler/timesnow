@@ -142,6 +142,22 @@ impl Parser {
                     sprite: parse_ident(&line.tokens[1..], line)?,
                 });
             }
+            // @chapter 文本 —— 只给存档一个可读标签，不影响画面
+            "chapter" => {
+                let label = match expect_token(&line.tokens[1..], 0, line, "章节名")? {
+                    Token::Str(s) => s.clone(),
+                    Token::Ident(s) => s.clone(),
+                    other => {
+                        return Err(ParseError {
+                            line: line.number,
+                            column: line.indent + 1,
+                            message: format!("@chapter 期望章节名，得到 {other:?}"),
+                            snippet: line.raw.clone(),
+                        });
+                    }
+                };
+                out.push(Step::Chapter { label });
+            }
             "show" => {
                 out.push(parse_show(&line.tokens[1..], line)?);
             }

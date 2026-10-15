@@ -332,19 +332,42 @@ A corrupt image logs `纹理解码失败，已跳过: xxx` and is skipped; every
 
 ### Where's the save file?
 
-Press `S` to save, `L` to load. The save file is called `save.ron`, stored in the project root.
+Press `S` for the **save screen** (9 slots), `L` for the load screen. Arrow keys pick a slot, number
+keys jump straight to one, `Enter` confirms, `Esc` backs out. `F5` / `F9` are the quick save/load
+(they use slot 1).
+
+Saves live in `saves/slot1.ron` … `saves/slot9.ron` inside your project directory.
 
 **What it stores:** current block and position, all variables, the stage (background and sprites),
-the BGM that's playing, and the last line spoken. **Saving while a choice is on screen works too** —
-loading puts you back on the same set of options.
+the BGM that's playing, the last line spoken, the **backlog**, and the chapter name set by
+`@chapter` (shown in the save screen as "which chapter + which line"). **Saving while a choice is on
+screen works too** — loading puts you back on the same set of options.
+
+**Old saves still load.** Early versions kept the save at `save.ron` in the project root: as long as
+`saves/` is empty it shows up in slot 1, so nothing is lost. The format carries a version number and
+pre-versioning saves are treated as v1.
 
 **Loading after you've edited the script:** the engine relocates by matching the line text; if it
 can't, you're taken back to the start of the current block and the console says so. If you saved on
 a choice and that set of options has changed (text or count), you get a notice — the position is kept
 whenever possible, so you don't have to re-read earlier lines.
 
-**Old saves still load.** The format carries a version number; saves from before versioning are
-treated as v1 rather than being rejected.
+### How do I re-read earlier lines?
+
+Press `PageUp` (or `B`) for the backlog and scroll up; `PageUp`/`PageDown` or the wheel pages through
+it, `Esc` returns. The last 200 lines are kept, and they travel with your saves — loading a slot
+keeps its history.
+
+### How do I label chapters?
+
+Put a line in your script and the save screen will show the chapter name:
+
+```
+:: ch2_start
+@chapter "第二章 · 湖边"
+```
+
+It only gives saves a readable label; it doesn't change what's on screen.
 
 ## Next
 

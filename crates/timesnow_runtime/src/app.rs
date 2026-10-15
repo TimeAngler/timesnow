@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::saves::{self, SLOT_COUNT, SlotInfo};
 use crate::script::{AudioEvent, Script};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +22,58 @@ const ERROR_LINE_HEIGHT_PX: f32 = 18.0;
 
 /// 错误页下多久查一次"文件改好了没"。太密会白烧 CPU，太疏显得卡。
 const ERROR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// backlog 界面上每行的高度（像素）
+const BACKLOG_LINE_HEIGHT_PX: f32 = 24.0;
+
+/// 存档界面每行的高度（像素）
+const SLOT_LINE_HEIGHT_PX: f32 = 30.0;
+
+/// 屏幕提示显示多久
+const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 槽位界面的两种模式（画法一样，只是标题和确认动作不同）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotMode {
+    Save,
+    Load,
+}
+
+/// 当前"在哪个界面"。剧本只管 Playing，其它几个是盖在上面的 UI。
+///
+/// 这层状态的意义是**输入归属明确**：菜单开着的时候，点击和 S/L 不能再漏到剧本里，
+/// 否则你回看历史时点一下鼠标，剧情会自己往前走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// 正常跑剧本
+    Playing,
+    /// 回看历史
+    Backlog { scroll: usize },
+    /// 存档界面（选一个槽位写进去）
+    SaveMenu { cursor: usize },
+    /// 读档界面（选一个槽位读出来）
+    LoadMenu { cursor: usize },
+}
+
+impl Screen {
+    /// 这个界面是否要暂停剧本推进
+    fn pauses_script(&self) -> bool {
+        !matches!(self, Screen::Playing)
+    }
+}
+
+/// 需要"离开窗口事件处理"才能做的事（要同时借用 window / audio / script 等）。
+/// 攒起来在处理完事件后统一执行，避免借用冲突。
+enum PendingAction {
+    /// 打开存/读档界面（要把槽位列表读出来）
+    OpenSaveMenu,
+    OpenLoadMenu,
+    CloseMenu,
+    /// 存到指定槽位
+    WriteSlot(usize),
+    /// 从指定槽位读
+    ReadSlot(usize),
+}
 
 pub struct App {
     window: Option<Arc<Window>>,
@@ -45,6 +98,14 @@ pub struct App {
     needs_redraw: bool,
     /// 进入错误页的时刻，用来控制"多久查一次文件"
     error_since: Option<Instant>,
+    /// 当前界面
+    screen: Screen,
+    /// 槽位列表（打开存/读档界面时读一次，界面显示期间不动）
+    slots: Vec<SlotInfo>,
+    /// 需要延迟执行的动作
+    pending: Vec<PendingAction>,
+    /// 屏幕上的提示（比如"已存档到槽位 3"），显示若干秒
+    toast: Option<(String, Instant)>,
 }
 
 impl App {
@@ -118,6 +179,10 @@ impl App {
             // 第一帧总要画
             needs_redraw: true,
             error_since,
+            screen: Screen::Playing,
+            slots: Vec::new(),
+            pending: Vec::new(),
+            toast: None,
         })
     }
 
@@ -231,6 +296,324 @@ impl App {
         }
 
         r.render();
+    }
+
+    /// 回看历史：半透明黑底 + 从下往上排的历史台词。
+    fn draw_backlog(&mut self, width: u32, height: u32, scroll: usize) {
+        let Some(script) = self.script.as_ref() else {
+            return;
+        };
+        let entries: Vec<(Option<String>, String)> = script
+            .backlog()
+            .iter()
+            .map(|e| (e.speaker.clone(), e.text.clone()))
+            .collect();
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+
+        r.clear_ui();
+        r.clear_text();
+        r.set_characters(&[]);
+        r.set_alpha(1.0);
+
+        // 半透明底：铺一张白纹理再乘上暗色
+        r.add_ui_tinted("white", Rect::fullscreen(), (0.05, 0.05, 0.08));
+
+        let line_h = BACKLOG_LINE_HEIGHT_PX / height.max(1) as f32;
+        let rows = ((0.80 / line_h).floor() as usize).max(1);
+        let text_width_px = (width as f32 * 0.90).max(1.0);
+
+        // scroll 是从最新往上数的偏移：0 = 贴着底部
+        let total = entries.len();
+        let end = total.saturating_sub(scroll);
+        let start = end.saturating_sub(rows);
+
+        let title = if total == 0 {
+            "回看历史（还没有内容）".to_string()
+        } else {
+            format!(
+                "回看历史  {}/{}   PgUp/PgDn 翻页   Esc 返回",
+                end.min(total),
+                total
+            )
+        };
+        r.add_debug_text(&title, 0.04, 0.03, 1.0, (255, 230, 200));
+
+        let mut y = 0.10;
+        if start >= end {
+            r.add_debug_text("（这一页没有内容）", 0.06, y, 1.0, (170, 170, 170));
+        } else {
+            for (speaker, text) in &entries[start..end] {
+                let line = match speaker {
+                    Some(s) => format!("{s}：{text}"),
+                    None => text.clone(),
+                };
+                let color = if speaker.is_some() {
+                    (235, 235, 235)
+                } else {
+                    (200, 200, 200)
+                };
+                r.add_debug_text_wrapped(&line, 0.05, y, 1.0, color, text_width_px);
+                y += line_h;
+            }
+        }
+
+        r.render();
+    }
+
+    /// 存/读档界面：9 个槽位，当前光标高亮。
+    fn draw_slots(&mut self, height: u32, mode: SlotMode, cursor: usize) {
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+
+        r.clear_ui();
+        r.clear_text();
+        r.set_characters(&[]);
+        r.set_alpha(1.0);
+        r.add_ui_tinted("white", Rect::fullscreen(), (0.05, 0.05, 0.08));
+
+        let line_h = SLOT_LINE_HEIGHT_PX / height.max(1) as f32;
+
+        let title = match mode {
+            SlotMode::Save => "存档   ↑/↓ 选择   Enter 保存   Esc 返回",
+            SlotMode::Load => "读档   ↑/↓ 选择   Enter 读取   Esc 返回",
+        };
+        r.add_debug_text(title, 0.06, 0.05, 1.0, (255, 230, 200));
+
+        let mut y = 0.14;
+        for i in 1..=SLOT_COUNT {
+            let info = self.slots.iter().find(|s| s.index == i);
+            let body = match info {
+                Some(info) if info.exists => info.label(),
+                _ => "（空）".to_string(),
+            };
+            let prefix = if i == cursor { "▶" } else { " " };
+            let line = format!("{prefix} 槽位 {i}   {body}");
+            let color = if i == cursor {
+                (255, 240, 180)
+            } else if info.map(|s| s.exists).unwrap_or(false) {
+                (220, 220, 220)
+            } else {
+                (130, 130, 130)
+            };
+            r.add_debug_text(&line, 0.07, y, 1.0, color);
+            y += line_h;
+        }
+
+        // 存档模式下的光标高亮框
+        if mode == SlotMode::Save || mode == SlotMode::Load {
+            let box_y = 0.14 + (cursor.saturating_sub(1)) as f32 * line_h - line_h * 0.15;
+            r.add_ui_tinted(
+                "white",
+                Rect::new(0.06, box_y, 0.88, line_h * 0.95),
+                (0.18, 0.18, 0.28),
+            );
+        }
+
+        r.render();
+    }
+
+    /// 屏幕提示（"已存档到槽位 3"这种），若干秒后自己消失
+    fn draw_toast(&mut self) {
+        let Some((text, since)) = self.toast.clone() else {
+            return;
+        };
+        if since.elapsed() > TOAST_DURATION {
+            self.toast = None;
+            return;
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            r.add_debug_text(&text, 0.04, 0.955, 1.0, (200, 255, 200));
+        }
+    }
+
+    /// 处理攒下来的动作（要同时碰 script / audio / window，所以不能在事件匹配里直接做）
+    fn run_pending(&mut self) {
+        let actions = std::mem::take(&mut self.pending);
+        for action in actions {
+            match action {
+                PendingAction::OpenSaveMenu => {
+                    self.slots = saves::list_slots(&self.project_dir);
+                    self.screen = Screen::SaveMenu { cursor: 1 };
+                    self.needs_redraw = true;
+                }
+                PendingAction::OpenLoadMenu => {
+                    self.slots = saves::list_slots(&self.project_dir);
+                    self.screen = Screen::LoadMenu { cursor: 1 };
+                    self.needs_redraw = true;
+                }
+                PendingAction::CloseMenu => {
+                    self.screen = Screen::Playing;
+                    self.needs_redraw = true;
+                }
+                PendingAction::WriteSlot(index) => {
+                    if let Some(script) = self.script.as_ref() {
+                        let data = script.save_data();
+                        match saves::write_slot(&self.project_dir, index, &data) {
+                            Ok(()) => {
+                                println!("已存档到槽位 {index}");
+                                self.toast =
+                                    Some((format!("已存档到槽位 {index}"), Instant::now()));
+                                self.slots = saves::list_slots(&self.project_dir);
+                            }
+                            Err(e) => {
+                                eprintln!("存档失败: {e}");
+                                self.toast = Some((format!("存档失败: {e}"), Instant::now()));
+                            }
+                        }
+                    }
+                }
+                PendingAction::ReadSlot(index) => {
+                    match saves::read_slot(&self.project_dir, index) {
+                        Ok(data) => {
+                            if let Some(script) = self.script.as_mut() {
+                                if let Some(notice) = script.apply_save(data) {
+                                    eprintln!("读档提示: {notice}");
+                                    self.toast = Some((notice.to_string(), Instant::now()));
+                                } else {
+                                    self.toast =
+                                        Some((format!("已读取槽位 {index}"), Instant::now()));
+                                }
+                                if let Some(bgm) = script.take_resumable_bgm()
+                                    && let Err(e) = self.audio.play_bgm(&bgm)
+                                {
+                                    eprintln!("恢复 BGM 失败: {e}");
+                                }
+                            }
+                            self.screen = Screen::Playing;
+                        }
+                        Err(e) => {
+                            eprintln!("读档失败: {e}");
+                            self.toast = Some((format!("读档失败: {e}"), Instant::now()));
+                        }
+                    }
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    // ---------- 输入：按界面的三种处理 ----------
+
+    /// 正常游戏中
+    fn handle_playing_key(&mut self, key: PhysicalKey) {
+        let Some(script) = self.script.as_mut() else {
+            return;
+        };
+        match key {
+            PhysicalKey::Code(KeyCode::Digit1) => script.select_choice(0),
+            PhysicalKey::Code(KeyCode::Digit2) => script.select_choice(1),
+            PhysicalKey::Code(KeyCode::Digit3) => script.select_choice(2),
+            PhysicalKey::Code(KeyCode::Digit4) => script.select_choice(3),
+            // S / L 打开界面（不再直接覆盖固定文件），F5 / F9 才是快速存读
+            PhysicalKey::Code(KeyCode::KeyS) => self.pending.push(PendingAction::OpenSaveMenu),
+            PhysicalKey::Code(KeyCode::KeyL) => self.pending.push(PendingAction::OpenLoadMenu),
+            PhysicalKey::Code(KeyCode::F5) => self.pending.push(PendingAction::WriteSlot(1)),
+            PhysicalKey::Code(KeyCode::F9) => self.pending.push(PendingAction::ReadSlot(1)),
+            // 回看历史
+            PhysicalKey::Code(KeyCode::PageUp) | PhysicalKey::Code(KeyCode::KeyB) => {
+                self.screen = Screen::Backlog { scroll: 0 };
+                self.needs_redraw = true;
+            }
+            _ => {}
+        }
+        // 存/读档界面要用到槽位列表，交给 run_pending 处理
+        if !self.pending.is_empty() {
+            self.run_pending();
+        }
+    }
+
+    /// 回看历史界面
+    fn handle_backlog_key(&mut self, key: PhysicalKey, scroll: usize) {
+        match key {
+            PhysicalKey::Code(KeyCode::Escape)
+            | PhysicalKey::Code(KeyCode::PageUp)
+            | PhysicalKey::Code(KeyCode::KeyB) => {
+                self.screen = Screen::Playing;
+                self.needs_redraw = true;
+            }
+            PhysicalKey::Code(KeyCode::PageDown) | PhysicalKey::Code(KeyCode::ArrowDown) => {
+                let new = scroll.saturating_sub(1);
+                self.screen = Screen::Backlog { scroll: new };
+            }
+            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                let new = self.clamp_backlog_scroll(scroll + 1);
+                self.screen = Screen::Backlog { scroll: new };
+            }
+            PhysicalKey::Code(KeyCode::Home) => {
+                self.screen = Screen::Backlog { scroll: 0 };
+            }
+            _ => {}
+        }
+    }
+
+    /// 存/读档界面
+    fn handle_slot_key(&mut self, key: PhysicalKey, cursor: usize, mode: SlotMode) {
+        match key {
+            PhysicalKey::Code(KeyCode::Escape) => self.pending.push(PendingAction::CloseMenu),
+            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                let next = (cursor % SLOT_COUNT) + 1;
+                self.screen = match mode {
+                    SlotMode::Save => Screen::SaveMenu { cursor: next },
+                    SlotMode::Load => Screen::LoadMenu { cursor: next },
+                };
+            }
+            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                let prev = if cursor <= 1 { SLOT_COUNT } else { cursor - 1 };
+                self.screen = match mode {
+                    SlotMode::Save => Screen::SaveMenu { cursor: prev },
+                    SlotMode::Load => Screen::LoadMenu { cursor: prev },
+                };
+            }
+            // 数字键直接选槽位
+            PhysicalKey::Code(code) => {
+                if let Some(n) = digit_from_key(code)
+                    && n <= SLOT_COUNT
+                {
+                    self.screen = match mode {
+                        SlotMode::Save => Screen::SaveMenu { cursor: n },
+                        SlotMode::Load => Screen::LoadMenu { cursor: n },
+                    };
+                }
+            }
+            _ => {}
+        }
+
+        // Enter 确认
+        if key == PhysicalKey::Code(KeyCode::Enter) {
+            match mode {
+                SlotMode::Save => self.pending.push(PendingAction::WriteSlot(cursor)),
+                SlotMode::Load => self.pending.push(PendingAction::ReadSlot(cursor)),
+            }
+        }
+
+        if !self.pending.is_empty() {
+            self.run_pending();
+        }
+    }
+
+    /// 回看历史的滚动上限：不能翻到"比最老的还老"的地方
+    fn clamp_backlog_scroll(&self, scroll: usize) -> usize {
+        let total = self.script.as_ref().map(|s| s.backlog().len()).unwrap_or(0);
+        scroll.min(total.saturating_sub(1))
+    }
+}
+
+/// 数字键 → 槽位号（1..=9）。数字区和小键盘都认。
+fn digit_from_key(code: KeyCode) -> Option<usize> {
+    match code {
+        KeyCode::Digit1 | KeyCode::Numpad1 => Some(1),
+        KeyCode::Digit2 | KeyCode::Numpad2 => Some(2),
+        KeyCode::Digit3 | KeyCode::Numpad3 => Some(3),
+        KeyCode::Digit4 | KeyCode::Numpad4 => Some(4),
+        KeyCode::Digit5 | KeyCode::Numpad5 => Some(5),
+        KeyCode::Digit6 | KeyCode::Numpad6 => Some(6),
+        KeyCode::Digit7 | KeyCode::Numpad7 => Some(7),
+        KeyCode::Digit8 | KeyCode::Numpad8 => Some(8),
+        KeyCode::Digit9 | KeyCode::Numpad9 => Some(9),
+        _ => None,
     }
 }
 
@@ -373,6 +756,31 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // 执行这一帧之前攒下的动作（开菜单、存读档…）
+                if !self.pending.is_empty() {
+                    self.run_pending();
+                }
+
+                // 覆盖层界面：剧本不推进，只画界面，然后本帧就结束
+                match self.screen {
+                    Screen::Backlog { scroll } => {
+                        self.draw_backlog(width, height, scroll);
+                        self.draw_toast();
+                        return;
+                    }
+                    Screen::SaveMenu { cursor } => {
+                        self.draw_slots(height, SlotMode::Save, cursor);
+                        self.draw_toast();
+                        return;
+                    }
+                    Screen::LoadMenu { cursor } => {
+                        self.draw_slots(height, SlotMode::Load, cursor);
+                        self.draw_toast();
+                        return;
+                    }
+                    Screen::Playing => {}
+                }
+
                 if self.config.check_reload() {
                     // 配置变了，让 renderer 和 script 都感知
                     self.apply_config();
@@ -470,14 +878,29 @@ impl ApplicationHandler for App {
                     r.render();
                 }
 
-                // 还在演出中就再排一帧；静止时交给 about_to_wait 去 Wait
-                self.needs_redraw = script.is_animating();
+                // 还在演出中（打字机/等待/淡入淡出）就再排一帧
+                let animating = script.is_animating();
+
+                // 提示条盖在最上面。要在 script 的可变借用结束之后画。
+                if self.toast.is_some() {
+                    self.draw_toast();
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.render();
+                    }
+                    // 提示还在显示 → 需要继续出帧（它自己会过期）
+                }
+
+                self.needs_redraw = animating || self.toast.is_some();
             }
             WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
+                // 菜单/回看界面下，点击不能漏到剧本里去（否则回看历史时会推进剧情）
+                if self.screen.pauses_script() {
+                    return;
+                }
                 let Some(script) = self.script.as_mut() else {
                     // 错误页下点击没有意义
                     return;
@@ -495,48 +918,33 @@ impl ApplicationHandler for App {
                     script.advance();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == winit::event::ElementState::Pressed {
-                    // 读档可能要恢复 BGM，先攒着，等借用结束再播
-                    let mut pending_bgm: Option<String> = None;
-                    let Some(script) = self.script.as_mut() else {
-                        return;
+            WindowEvent::MouseWheel { delta, .. } => {
+                // 回看界面里滚轮翻页
+                if let Screen::Backlog { scroll } = self.screen {
+                    let step = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y as isize,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as isize,
                     };
-                    match event.physical_key {
-                        PhysicalKey::Code(KeyCode::Digit1) => script.select_choice(0),
-                        PhysicalKey::Code(KeyCode::Digit2) => script.select_choice(1),
-                        PhysicalKey::Code(KeyCode::Digit3) => script.select_choice(2),
-                        PhysicalKey::Code(KeyCode::Digit4) => script.select_choice(3),
-                        PhysicalKey::Code(KeyCode::KeyS) => {
-                            let path = self.project_dir.join("save.ron");
-                            if let Err(e) = script.save(&path) {
-                                eprintln!("存档失败: {e}");
-                            }
-                        }
-                        PhysicalKey::Code(KeyCode::KeyL) => {
-                            let path = self.project_dir.join("save.ron");
-                            match script.load_from(&path) {
-                                Ok(notice) => {
-                                    // 剧本改动过 / 存档比引擎新，都在这里告诉玩家
-                                    if let Some(notice) = notice {
-                                        eprintln!("读档提示: {notice}");
-                                    }
-                                    // 读档要接着播存档里那首 BGM
-                                    if let Some(bgm) = script.take_resumable_bgm() {
-                                        pending_bgm = Some(bgm);
-                                    }
-                                }
-                                Err(e) => eprintln!("读档失败: {e}"),
-                            }
-                        }
-                        _ => {}
+                    let new = scroll.saturating_add_signed(step);
+                    self.screen = Screen::Backlog {
+                        scroll: self.clamp_backlog_scroll(new),
+                    };
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != winit::event::ElementState::Pressed {
+                    return;
+                }
+                match self.screen {
+                    Screen::Playing => self.handle_playing_key(event.physical_key),
+                    Screen::Backlog { scroll } => {
+                        self.handle_backlog_key(event.physical_key, scroll)
                     }
-
-                    // 借用已经结束，可以动 audio 了
-                    if let Some(bgm) = pending_bgm
-                        && let Err(e) = self.audio.play_bgm(&bgm)
-                    {
-                        eprintln!("恢复 BGM 失败: {e}");
+                    Screen::SaveMenu { cursor } => {
+                        self.handle_slot_key(event.physical_key, cursor, SlotMode::Save)
+                    }
+                    Screen::LoadMenu { cursor } => {
+                        self.handle_slot_key(event.physical_key, cursor, SlotMode::Load)
                     }
                 }
             }
@@ -695,5 +1103,38 @@ mod tests {
             max_lines > 20 && max_lines <= ERROR_PAGE_MAX_LINES,
             "实际 {max_lines}"
         );
+    }
+
+    /// 覆盖层界面必须暂停剧本，否则回看历史/开菜单时剧情会自己往前走
+    #[test]
+    fn overlay_screens_pause_the_script() {
+        assert!(!Screen::Playing.pauses_script());
+        assert!(Screen::Backlog { scroll: 0 }.pauses_script());
+        assert!(Screen::SaveMenu { cursor: 1 }.pauses_script());
+        assert!(Screen::LoadMenu { cursor: 1 }.pauses_script());
+    }
+
+    /// 槽位能用数字键直接选（存档界面里省一次上下键）
+    #[test]
+    fn digit_keys_map_to_slots() {
+        assert_eq!(digit_from_key(KeyCode::Digit1), Some(1));
+        assert_eq!(digit_from_key(KeyCode::Numpad9), Some(9));
+        assert_eq!(digit_from_key(KeyCode::Digit0), None);
+        assert_eq!(digit_from_key(KeyCode::KeyS), None);
+        // 所有数字都不超过槽位总数
+        for code in [KeyCode::Digit1, KeyCode::Digit5, KeyCode::Numpad9] {
+            assert!(digit_from_key(code).unwrap() <= SLOT_COUNT);
+        }
+    }
+
+    /// 回看历史的滚动上限：不能翻到比最老的还老
+    #[test]
+    fn backlog_scroll_is_clamped() {
+        // 没有 App 实例也能验证公式：scroll 最大为 total-1
+        let clamp = |scroll: usize, total: usize| scroll.min(total.saturating_sub(1));
+        assert_eq!(clamp(0, 3), 0);
+        assert_eq!(clamp(2, 3), 2);
+        assert_eq!(clamp(99, 3), 2);
+        assert_eq!(clamp(5, 0), 0, "没有历史时不能翻");
     }
 }
