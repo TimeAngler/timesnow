@@ -163,6 +163,7 @@ crates/
 
 - [快速开始](docs/getting-started.md) · [Getting started](docs/getting-started.en.md)
 - [DSL 语法参考](docs/dsl.md) · [DSL reference](docs/dsl.en.md)
+- [设计愿景](docs/vision.md) —— 为什么做这个，以及**刻意不做什么**
 
 ## License
 
