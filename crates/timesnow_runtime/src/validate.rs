@@ -327,36 +327,65 @@ fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnosti
 /// `好感` 从来没被赋过值，运行期会报"变量还没有值"，
 /// 这里提前告诉作者。
 fn check_variables(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
-    // ① 条件里读的变量：仍然用"整个剧本有没有赋过值"这个粗判。
-    //    条件分散在分支里，第一次赋值可能在任何一条路径上，
-    //    按顺序判会误报，所以这里只抓"从来没出现过"。
+    // ① 条件里读的、以及 `@say` 文本里插值读的变量：都用"整个剧本有没有
+    //    赋过值"这个粗判。
+    //
+    //    为什么不用精确的数据流：赋值分散在分支里，第一次赋值可能在任何
+    //    一条路径上（`ch9` 的四个选项各赋一次 `plan`，尾声再读它）。
+    //    按顺序判会把这种正确写法全报成错。所以这里只抓"从来没出现过"。
     let assigned = assigned_vars(script);
     let mut read_anywhere: BTreeSet<String> = BTreeSet::new();
+    let mut read_in_cond: BTreeSet<String> = BTreeSet::new();
+    let mut read_in_text: BTreeSet<String> = BTreeSet::new();
 
     for steps in script.blocks.values() {
         for step in steps {
-            if let Step::If { cond, .. } = step {
-                collect_cond_vars(cond, &mut read_anywhere);
+            match step {
+                Step::If { cond, .. } => {
+                    collect_cond_vars(cond, &mut read_anywhere);
+                    collect_cond_vars(cond, &mut read_in_cond);
+                }
+                // 插值：`@say "你选的是：{plan}。"`
+                //
+                // 漏了这个是个玩家可见的洞：`expand_text` 对查不到的变量
+                // 原样输出，所以 `{好敢}` 会让玩家看到字面的 `{好敢}`。
+                // 而插值是 DSL 里读变量最常用的方式，比 `@if` 还常用。
+                Step::Say { text, .. } => {
+                    let mut names = BTreeSet::new();
+                    collect_placeholder_vars(text, &mut names);
+                    read_in_text.extend(names.iter().cloned());
+                    read_anywhere.extend(names);
+                }
+                _ => {}
             }
         }
     }
 
-    for name in read_anywhere
+    // 候选是"整个剧本出现过的所有变量名"——包括只被读过、从没赋值的那些
+    // （作者可能两边都打错了，但至少能看到自己写过什么）。
+    let candidates: Vec<&str> = assigned
+        .iter()
+        .copied()
+        .chain(read_anywhere.iter().map(|s| s.as_str()))
+        .collect();
+
+    let missing: Vec<&String> = read_anywhere
         .iter()
         .filter(|n| !assigned.contains(n.as_str()))
-    {
+        .collect();
+
+    for name in missing {
         // 变量名差一个字很难看出来（`好感` / `好敢`），所以给建议。
-        // 候选是"整个剧本出现过的所有变量名"——包括只被读过、
-        // 从没赋值的那些（作者可能两边都打错了，但至少能看到自己写过什么）。
-        let mut candidates: Vec<&str> = assigned.iter().copied().collect();
-        candidates.extend(read_anywhere.iter().map(|s| s.as_str()));
-        let hint = crate::suggest::suggestion_message(name, candidates, "变量");
+        let hint = crate::suggest::suggestion_message(name, candidates.clone(), "变量");
+        let where_read = match (read_in_cond.contains(name), read_in_text.contains(name)) {
+            (true, true) => "在条件和台词插值里都被读取",
+            (false, true) => "在台词插值里被读取（游戏里会原样显示 {…}）",
+            _ => "在条件里被读取（条件恒为 false）",
+        };
         out.push(Diagnostic {
             level: DiagnosticLevel::Warning,
             location: "script.tsn".into(),
-            message: format!(
-                "变量 '{name}' 在条件里被读取，但整个剧本没有设置过它（条件恒为 false）{hint}"
-            ),
+            message: format!("变量 '{name}' {where_read}，但整个剧本没有设置过它{hint}"),
             snippet: None,
         });
     }
@@ -366,6 +395,30 @@ fn check_variables(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
     //    只看集合永远抓不到"x 其实还没值"。
     //    从起始块线性走一遍，遇到读之前没赋过值的就报。
     check_expression_order(script, out);
+}
+
+/// 从一句台词里抽出所有 `{name}` 插值的变量名。
+///
+/// **必须和 `Vm::expand_text` 的解析完全一致**，否则校验器和运行时会给出
+/// 不同的答案（一边报错一边正常，或者反过来）。那边的规则是：
+/// 找 `{`，再找它之后的第一个 `}`，中间**整段**就是变量名——
+/// 不 trim、不校验字符、不嵌套。
+fn collect_placeholder_vars(text: &str, out: &mut BTreeSet<String>) {
+    if !text.contains('{') {
+        return;
+    }
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                out.insert(after[..close].to_string());
+                rest = &after[close + 1..];
+            }
+            // 没有闭合的 `}`：`expand_text` 在那里原样输出剩下的，就此打住
+            None => return,
+        }
+    }
 }
 
 /// 从 `start` 块按顺序走，检查 `@set` 右边引用的变量在那一刻有没有值。
@@ -697,6 +750,123 @@ mod tests {
         assert!(
             text.iter().any(|t| t.contains("好感")),
             "应当建议 好感，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `@say` 里插值的变量名打错：这是**玩家可见**的错，
+    /// `expand_text` 对查不到的变量原样输出，所以画面上会出现字面的 `{好敢}`。
+    #[test]
+    fn misspelled_variable_in_interpolation_is_warned() {
+        let dir = fresh_dir("interp_typo");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 好感 = 1\n@say \"{好感} 对的\"\n@say \"{好敢} 错的\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("好敢")),
+            "应当提示 好敢 没设过：{text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("好感")),
+            "应当建议 好感，实际：{text:?}"
+        );
+        // 提示里要说清楚后果：游戏里会原样显示
+        assert!(
+            text.iter().any(|t| t.contains("原样显示")),
+            "应当说明会原样显示，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 插值读的变量只要**某个地方**赋过值就不报。
+    ///
+    /// 这条对应 `phone` 里的真实写法：`ch9` 的四个选项各赋一次 `plan`，
+    /// 尾声的 `@say "{plan}"` 再读它。每个分支都赋值，所以是正确的；
+    /// 用精确数据流判会把这种写法全报成错，所以判据只能是
+    /// "整个剧本有没有出现过"。
+    #[test]
+    fn interpolation_assigned_in_a_branch_is_not_warned() {
+        let dir = fresh_dir("interp_branch_ok");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@choice\n    \"甲\" -> a { plan = \"甲\" }\n    \"乙\" -> a { plan = \"乙\" }\n\n\
+             :: a\n@say \"你选的是：{plan}。\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            !text.iter().any(|t| t.contains("plan")),
+            "plan 在分支里赋过值，不该报：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 校验器的插值解析必须和 `Vm::expand_text` 完全一致。
+    ///
+    /// 不一致的后果：一边报错、一边正常运行（或者反过来）。
+    /// `expand_text` 的规则是"第一个 `{` 到其后第一个 `}` 之间**整段**都是
+    /// 变量名"——所以嵌套的花括号不是语法，而是名字的一部分。
+    #[test]
+    fn placeholder_parsing_matches_the_runtime() {
+        let dir = fresh_dir("interp_edges");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+
+        // ① 整段都是名字：`半个 还有 {真名` 从第一个 `{` 到第一个 `}` 之间，
+        //    所以变量名是「半个 还有 {真名」——运行时查不到、原样输出，
+        //    校验器也该报这一个名字。
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 真名 = 1\n@say \"半个 {半个 还有 {真名}\"\n",
+        );
+        let text = summary(&validate(&dir));
+        assert!(
+            text.iter().any(|t| t.contains("半个 还有 {真名")),
+            "整段都该当作变量名（和 expand_text 一致）：{text:?}"
+        );
+
+        // ② 完全没有闭合的 `}`：`expand_text` 在那儿原样输出剩下的、就此打住，
+        //    所以后面那一段**不该**被当成插值。
+        std::fs::remove_dir_all(&dir).ok();
+        let dir = fresh_dir("interp_unclosed");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 真名 = 1\n@say \"半个 {没有闭合，后面还有 {真名}\"\n",
+        );
+        let text = summary(&validate(&dir));
+        assert!(
+            text.iter().any(|t| t.contains("没有闭合")),
+            "没闭合的那一整段才是变量名：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 一条台词里多个插值都要查
+    #[test]
+    fn every_placeholder_in_a_line_is_checked() {
+        let dir = fresh_dir("interp_many");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 甲 = 1\n@say \"{甲}{乙}{丙}\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(text.iter().any(|t| t.contains("乙")), "乙 该报：{text:?}");
+        assert!(text.iter().any(|t| t.contains("丙")), "丙 该报：{text:?}");
+        assert!(
+            !text.iter().any(|t| t.contains("'甲'")),
+            "甲 赋过值，不该报：{text:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
