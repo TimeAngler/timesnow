@@ -789,3 +789,58 @@ fn control_commands_appear_in_the_fingerprint() {
         "多了一条 @quit 结构就变了，指纹必须不同"
     );
 }
+
+#[test]
+fn move_updates_the_stage_to_the_target_immediately() {
+    let vm = vm(
+        ":: start\n@show alice at 0.1 0.1 0.2 0.2\n@move alice to 0.5 0.5 0.3 0.3 over 1.0\n@say \"到\"\n",
+    );
+    // Stage 是终态（Vm 立刻更新），不是动画中间值
+    assert_eq!(vm.stage().characters[0].1.x, 0.5);
+    assert_eq!(vm.stage().characters[0].1.w, 0.3);
+}
+
+#[test]
+fn move_reports_a_moving_outcome() {
+    let mut vm = fresh_vm(
+        ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.5 0.3 0.3 over 0.6 ease_out\n",
+    );
+    vm.run_until_blocked();
+    match vm.run_until_blocked() {
+        Outcome::Moving {
+            sprite,
+            duration,
+            easing,
+            ..
+        } => {
+            assert_eq!(sprite, "a");
+            assert!((duration - 0.6).abs() < 1e-6);
+            assert_eq!(easing, crate::tween::Easing::EaseOut);
+        }
+        other => panic!("期望 Moving，得到 {other:?}"),
+    }
+    // 光标停在 @move 上，等 Presentation 完成后才推进
+    assert_eq!(vm.step_index(), 1);
+}
+
+#[test]
+fn moving_a_sprite_that_is_not_on_stage_warns_and_skips() {
+    let mut vm = vm(":: start\n@move alice to 0.5 0.5 0.3 0.3 over 1.0\n@say \"继续\"\n");
+    let err = vm.take_error().expect("应当报错");
+    assert!(err.contains("alice"), "实际：{err}");
+    // 没有阻塞——直接走到了下一句
+    assert!(matches!(vm.current_step(), Some(Step::Say { .. })));
+}
+
+#[test]
+fn zero_duration_move_does_not_stall() {
+    let vm = vm(
+        ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.5 0.3 0.3 over 0.0\n@say \"到\"\n",
+    );
+    assert_eq!(vm.stage().characters[0].1.x, 0.5);
+    // 应该直接到 @say
+    match vm.current_step() {
+        Some(Step::Say { .. }) => {}
+        other => panic!("期望停在 Say，得到 {other:?}"),
+    }
+}

@@ -289,6 +289,30 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    /// 测试用的临时目录。
+    ///
+    /// **刻意不用 `std::env::temp_dir()`**：受限 shell 里真实 `%TEMP%`
+    /// （`C:\Users\...\AppData\Local\Temp`）是只读的，会让一堆本来无关的
+    /// 测试报 `PermissionDenied`。改用工作区内的 `target/tsn-tests/`——
+    /// Cargo 自己就在那儿写东西，所以必定可写，`target/` 也已在 .gitignore 里。
+    ///
+    /// 用运行时读 `CARGO_TARGET_DIR` 而不是 `env!`：Cargo 不会把它传给 rustc，
+    /// `env!` 编译期拿不到。拿不到就退回 `CARGO_MANIFEST_DIR/../../target`
+    /// （crate 在 `crates/<name>/`，往上两层是工作区根）。
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            })
+            .join("tsn-tests");
+        // 带进程 id：并行跑的多个测试二进制会各自建同名 tag
+        let dir = base.join(format!("{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
     use super::*;
 
     #[test]
@@ -394,7 +418,7 @@ color = [220, 220, 220]
     /// 手写的配置文件可能给出离谱的值，读进来要收拾干净
     #[test]
     fn audio_values_are_sanitized_on_load() {
-        let dir = std::env::temp_dir().join(format!("tsn_cfg_{}", std::process::id()));
+        let dir = test_dir("cfg");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "[audio]\nmaster = 5.0\nbgm = -3.0\nse = 0.5\n").unwrap();
@@ -450,7 +474,7 @@ color = [220, 220, 220]
     /// 写回磁盘：存了再读，音量要一模一样（设置界面靠这个持久化）
     #[test]
     fn save_then_load_round_trips_the_audio_settings() {
-        let dir = std::env::temp_dir().join(format!("tsn_cfg_save_{}", std::process::id()));
+        let dir = test_dir("cfg-save");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "[window]\ntitle = \"存读测试\"\n").unwrap();
@@ -474,7 +498,7 @@ color = [220, 220, 220]
     /// 写回之后热重载不该把自己写的文件当成"外部改动"
     #[test]
     fn saving_does_not_trigger_a_spurious_reload() {
-        let dir = std::env::temp_dir().join(format!("tsn_cfg_reload_{}", std::process::id()));
+        let dir = test_dir("cfg-reload");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "[audio]\nmaster = 0.5\n").unwrap();

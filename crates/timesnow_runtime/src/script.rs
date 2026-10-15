@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use crate::program::save_version;
+use crate::tween::{Easing, MoveTween};
 
 /// 记录一组文件的修改时间，用于热重载检测
 fn collect_mtimes(paths: &[PathBuf]) -> Vec<(PathBuf, SystemTime)> {
@@ -390,6 +391,15 @@ pub enum Step {
     Quit,
     /// 回到标题画面：把剧本从头重新加载
     ReturnToTitle,
+    Move {
+        sprite: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        duration: f32,
+        easing: Easing,
+    },
 }
 
 impl Step {
@@ -412,6 +422,7 @@ impl Step {
             Step::Stop { .. } => "stop",
             Step::Quit => "quit",
             Step::ReturnToTitle => "title",
+            Step::Move { .. } => "move",
         }
     }
 
@@ -492,6 +503,8 @@ pub struct Presentation {
     fade_duration: f32,
 
     pub speed: f32,
+    /// 正在移动的立绘。每个 sprite 最多一条——重新 `@move` 会替换旧的。
+    moves: Vec<MoveTween>,
 }
 
 impl Default for Presentation {
@@ -506,7 +519,66 @@ impl Default for Presentation {
             fade_elapsed: 0.0,
             fade_duration: 0.0,
             speed: 0.03,
+            moves: Vec::new(),
         }
+    }
+}
+
+impl Presentation {
+    /// 启动一个立绘移动。同一个 sprite 已在动时，旧动画作废。
+    pub(crate) fn start_move(
+        &mut self,
+        sprite: String,
+        from: StageRect,
+        to: StageRect,
+        duration: f32,
+        easing: Easing,
+    ) {
+        self.moves.retain(|m| m.sprite != sprite);
+        self.moves
+            .push(MoveTween::new(sprite, from, to, duration, easing));
+    }
+
+    pub(crate) fn advance_moves(&mut self, dt: f32) {
+        for m in self.moves.iter_mut() {
+            m.advance(dt);
+        }
+        self.moves.retain(|m| !m.is_done());
+    }
+
+    /// 让所有动画**立刻到终点**，而不是把它们忘掉。
+    ///
+    /// 语义上必须用 `finish()`（elapsed 顶到 duration）而不是直接 `clear()`：
+    /// `sample()` 是 `Stage`（终态）和 tween 采样值的叠加，
+    /// 把 tween 扔掉会让采样退回起点，也就是"跳过之后立绘弹回原位"。
+    /// 现在 `Vm` 执行 `@move` 时已经把 Stage 更到终态、所以结果碰巧一样，
+    /// 但那是巧合，不该依赖。
+    pub(crate) fn finish_moves(&mut self) {
+        for m in self.moves.iter_mut() {
+            m.finish();
+        }
+        self.moves.retain(|m| !m.is_done());
+    }
+
+    pub(crate) fn is_moving(&self) -> bool {
+        !self.moves.is_empty()
+    }
+
+    /// Stage 里存的是终态；这里叠加正在进行的 tween 采样值。
+    pub(crate) fn sample_stage(&self, stage: &Stage) -> Vec<(String, StageRect)> {
+        stage
+            .characters
+            .iter()
+            .map(|(name, rect)| {
+                let r = self
+                    .moves
+                    .iter()
+                    .find(|m| &m.sprite == name)
+                    .map(|m| m.sample())
+                    .unwrap_or(*rect);
+                (name.clone(), r)
+            })
+            .collect()
     }
 }
 
@@ -602,6 +674,15 @@ impl Script {
 
     // ---------- 给 app 的只读查询 ----------
 
+    /// 渲染时该用的立绘位置：`Stage` 里是终态，这里叠加动画中的插值。
+    ///
+    /// **存档不经过这里**——`save_data` 拿的是 `vm.stage()` 的终态。
+    /// 存读档时正在播的动画会被跳过，直接呈现终态；
+    /// 读档是为了回到剧情点，不是为了回到那一帧动画。
+    pub fn current_visual_stage(&self) -> Vec<(String, StageRect)> {
+        self.presentation.sample_stage(self.vm.stage())
+    }
+
     pub fn current_stage(&self) -> &Stage {
         self.vm.stage()
     }
@@ -680,13 +761,24 @@ impl Script {
         self.vm.block()
     }
 
+    /// 是否有立绘正在移动。
+    ///
+    /// 和 `is_animating()` 的区别：后者还包括打字机和淡入淡出。
+    /// 测试和调试需要单独看动画时用这个。
+    pub fn is_moving(&self) -> bool {
+        self.presentation.is_moving()
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
         self.vm.program.fingerprint
     }
 
     /// 画面是否还在动（打字机没打完 / 正在淡入淡出 / 正在 @wait）
     pub fn is_animating(&self) -> bool {
-        if self.presentation.fade_duration > 0.0 || self.presentation.wait_timer > 0.0 {
+        if self.presentation.fade_duration > 0.0
+            || self.presentation.wait_timer > 0.0
+            || self.presentation.is_moving()
+        {
             return true;
         }
         self.is_typing()
@@ -736,7 +828,19 @@ impl Script {
             return Outcome::WaitingDuration(self.presentation.wait_timer);
         }
 
-        // 3) 打字机（剧本位置由 advance / 上面两个阻塞点推进）
+        // 3) 立绘移动
+        if self.presentation.is_moving() {
+            self.presentation.advance_moves(dt);
+            if self.presentation.is_moving() {
+                return Outcome::Animating;
+            }
+            // 全部完成，推进 VM 的光标
+            let outcome = self.vm.finish_blocking_step();
+            self.absorb(outcome.clone());
+            return outcome;
+        }
+
+        // 4) 打字机（剧本位置由 advance / 上面两个阻塞点推进）
         if self.is_typing() {
             self.tick_typewriter(dt);
         }
@@ -763,7 +867,7 @@ impl Script {
         // 下一帧又会重新开始等。
         let at_delay_step = matches!(
             self.vm.current_step(),
-            Some(Step::Wait { .. } | Step::Fade { .. })
+            Some(Step::Wait { .. } | Step::Fade { .. } | Step::Move { .. })
         );
 
         // 正在淡入淡出：直接把 alpha 顶到目标值
@@ -777,17 +881,26 @@ impl Script {
             self.presentation.wait_timer = 0.0;
         }
 
-        // 顺便把打字机打完——skip 时没必要一个字一个字等
-        if self.is_typing() {
-            self.skip_typewriter();
-        }
-
         let outcome = if at_delay_step {
             self.vm.finish_blocking_step()
         } else {
             self.vm.run_until_blocked()
         };
         self.absorb(outcome.clone());
+
+        // 清空必须在 absorb 之后——absorb 会把 Outcome::Moving 变成 start_move，
+        // 清在前面等于白清。
+        if self.presentation.is_moving() {
+            self.presentation.finish_moves();
+        }
+
+        // 打字机也必须在**步骤执行之后**跳过。执行前光标可能停在 @move / @wait 上，
+        // 那时还没有台词要打；步骤一跑，新露出的那句 visible_chars 是 0，
+        // 得在这之后补上，否则 skip 会卡在这一句上（is_animating 永远为真）。
+        if self.is_typing() {
+            self.skip_typewriter();
+        }
+
         outcome
     }
 
@@ -937,6 +1050,16 @@ impl Script {
                 self.presentation.fade_to = to;
                 self.presentation.fade_elapsed = 0.0;
                 self.presentation.fade_duration = duration;
+            }
+            Outcome::Moving {
+                sprite,
+                from,
+                to,
+                duration,
+                easing,
+            } => {
+                self.presentation
+                    .start_move(sprite, from, to, duration, easing);
             }
             _ => {}
         }
@@ -1259,6 +1382,30 @@ impl Script {
 /// 纯 `Vm` 的行为测试在 `vm_tests.rs`——那部分不该经过门面。
 #[cfg(test)]
 mod tests {
+
+    /// 测试用的临时目录。
+    ///
+    /// **刻意不用 `std::env::temp_dir()`**：受限 shell 里真实 `%TEMP%`
+    /// （`C:\Users\...\AppData\Local\Temp`）是只读的，会让一堆本来无关的
+    /// 测试报 `PermissionDenied`。改用工作区内的 `target/tsn-tests/`——
+    /// Cargo 自己就在那儿写东西，所以必定可写，`target/` 也已在 .gitignore 里。
+    ///
+    /// 用运行时读 `CARGO_TARGET_DIR` 而不是 `env!`：Cargo 不会把它传给 rustc，
+    /// `env!` 编译期拿不到。拿不到就退回 `CARGO_MANIFEST_DIR/../../target`
+    /// （crate 在 `crates/<name>/`，往上两层是工作区根）。
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            })
+            .join("tsn-tests");
+        // 带进程 id：并行跑的多个测试二进制会各自建同名 tag
+        let dir = base.join(format!("{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
     use super::*;
 
     /// 造一个完整 Script（含表现层）。不需要窗口，也不需要磁盘。
@@ -1643,7 +1790,7 @@ mod tests {
     /// 真的写盘再读回来（`S` / `L` 走的就是这两个函数）
     #[test]
     fn save_and_load_through_a_real_file() {
-        let path = std::env::temp_dir().join(format!("tsn_save_{}.ron", std::process::id()));
+        let path = test_dir("save-io").join("save.ron");
         let _ = std::fs::remove_file(&path);
 
         let src = ":: start\n@set hp = 9\n@play bgm main\n@say \"第一句\"\n@say \"第二句\"\n";
@@ -1672,7 +1819,7 @@ mod tests {
     #[test]
     fn loading_a_missing_save_is_an_error_not_a_panic() {
         let mut s = script(":: start\n@say \"x\"\n");
-        let path = std::env::temp_dir().join("tsn_definitely_missing_save.ron");
+        let path = test_dir("missing").join("nope.ron");
         let _ = std::fs::remove_file(&path);
         assert!(s.load_from(&path).is_err());
     }
@@ -1682,7 +1829,7 @@ mod tests {
     /// 造一个真的写在磁盘上的剧本，返回 (Script, 目录)
     /// `return_to_title` 要重新读文件，所以必须有个真文件
     fn script_on_disk(tag: &str, src: &str) -> (Script, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("tsn_title_{}_{}", std::process::id(), tag));
+        let dir = test_dir(tag);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("script.tsn");
         std::fs::write(&path, src).unwrap();
@@ -2195,5 +2342,97 @@ mod tests {
         assert_ne!(s.fingerprint().0, 0);
         assert!(s.main_path().ends_with("test.tsn"));
         assert!(s.watched_files().is_empty(), "测试台没有真文件");
+    }
+
+    #[test]
+    fn a_move_animates_over_time_and_then_continues() {
+        let mut s = script(
+            ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.1 0.2 0.2 over 1.0\n@say \"到\"\n",
+        );
+        s.update(0.0);
+        assert!(s.is_moving(), "@move 期间应当在动");
+
+        s.update(0.5);
+        let mid = s.current_visual_stage();
+        let x = mid.iter().find(|(n, _)| n == "a").unwrap().1.x;
+        assert!(x > 0.2 && x < 0.4, "半路应当在 0.3 附近，实际 {x}");
+
+        s.update(0.6);
+        // 动画结束——但光标已经走到 @say，打字机可能还在跑，那是另一回事
+        assert!(!s.is_moving(), "动画完成之后不该还在动");
+        assert_eq!(s.current_full_text().as_deref(), Some("到"));
+    }
+
+    #[test]
+    fn save_during_a_move_stores_the_target_position() {
+        let mut s = script(
+            ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.5 0.3 0.3 over 2.0\n@say \"到\"\n",
+        );
+        s.update(0.0);
+        s.update(0.5); // 动画刚开始
+
+        let data = s.save_data();
+        // 存档里应当是终态
+        let (_, rect) = data
+            .stage
+            .characters
+            .iter()
+            .find(|(n, _)| n == "a")
+            .unwrap();
+        assert!((rect.x - 0.5).abs() < 1e-6, "存的是终态，实际 {}", rect.x);
+    }
+
+    #[test]
+    fn finish_delays_skips_a_move() {
+        let mut s = script(
+            ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.5 0.3 0.3 over 5.0\n@say \"到\"\n",
+        );
+        s.update(0.0);
+        assert!(s.is_moving());
+
+        s.finish_delays();
+        assert!(!s.is_moving(), "finish_delays 之后不该还有动画");
+
+        // 位置应当是终态
+        let x = s
+            .current_visual_stage()
+            .iter()
+            .find(|(n, _)| n == "a")
+            .unwrap()
+            .1
+            .x;
+        assert!((x - 0.5).abs() < 1e-6, "应当已经在终点，实际 {x}");
+
+        // 光标应当已经走到 @say
+        assert_eq!(s.current_full_text().as_deref(), Some("到"));
+    }
+
+    /// skip / finish_delays 必须让动画**立刻完成**，而不是启动一个新的。
+    ///
+    /// 回归测试：早先 finish_moves() 放在 absorb() 之前，
+    /// absorb 又把 Outcome::Moving 变成了 start_move，
+    /// 结果 is_animating() 永远为真、skip 卡死在这一步。
+    #[test]
+    fn finish_delays_leaves_no_animation_running() {
+        let mut s = script(
+            ":: start\n@show a at 0.1 0.1 0.2 0.2\n@move a to 0.5 0.5 0.3 0.3 over 5.0\n@say \"到\"\n",
+        );
+        s.update(0.0); // 走到 @move，正常情况下这时是动画中
+        assert!(s.is_animating(), "正常情况下应当在动");
+
+        s.finish_delays();
+        assert!(
+            !s.is_animating(),
+            "finish_delays 之后不该还有任何动画在跑——有的话 skip 会卡住"
+        );
+        // 位置应当是终态，不是半路
+        let x = s
+            .current_visual_stage()
+            .iter()
+            .find(|(n, _)| n == "a")
+            .unwrap()
+            .1
+            .x;
+        assert!((x - 0.5).abs() < 1e-6, "应当已经在终点，实际 {x}");
     }
 }

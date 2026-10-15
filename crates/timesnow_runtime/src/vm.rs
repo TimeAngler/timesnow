@@ -12,6 +12,7 @@ use crate::script::{
     AudioEvent, BACKLOG_LIMIT, ChoiceOption, Cond, Control, HistoryEntry, Stage, StageRect, Step,
     Value,
 };
+use crate::tween::Easing;
 use std::collections::HashMap;
 
 /// 当前为什么停着。`Vm::run_until_blocked` 的返回值。
@@ -26,6 +27,17 @@ pub enum Outcome {
     WaitingDuration(f32),
     /// 正在 `@fade`
     DoingFade { to: f32, duration: f32 },
+    /// Vm 刚发起一个立绘移动（带完整参数，供 Presentation 初始化）。
+    /// 只有 `run_until_blocked` 会返回它。
+    Moving {
+        sprite: String,
+        from: StageRect,
+        to: StageRect,
+        duration: f32,
+        easing: Easing,
+    },
+    /// 有动画仍在进行中（`Script::update` 里的返回值）。
+    Animating,
     /// 停在选项上，等 `select_choice`
     AwaitingChoice,
     /// 剧本走到头 / 块不存在 / 跳转成环被拦下
@@ -298,6 +310,53 @@ impl Vm {
                         continue;
                     }
                     return Outcome::DoingFade { to, duration };
+                }
+                Step::Move {
+                    sprite,
+                    x,
+                    y,
+                    w,
+                    h,
+                    duration,
+                    easing,
+                } => {
+                    // 立绘不在舞台上 → 报错跳过。写剧本时最常见的错就是忘了先 @show，
+                    // 但这种情况不该把游戏挂住。
+                    let Some(from) = self
+                        .stage
+                        .characters
+                        .iter()
+                        .find(|(n, _)| n == &sprite)
+                        .map(|(_, r)| *r)
+                    else {
+                        self.pending_error = Some(format!("@move {sprite}：这个立绘不在舞台上"));
+                        self.step += 1;
+                        continue;
+                    };
+
+                    // Stage 立刻更新到终态。理由写在 `current_visual_stage` 的文档里：
+                    // 存档、@if 判断、任何"读 Stage"的地方都该看到移动之后的稳定值。
+                    let to = StageRect { x, y, w, h };
+                    for (n, r) in self.stage.characters.iter_mut() {
+                        if n == &sprite {
+                            *r = to;
+                            break;
+                        }
+                    }
+
+                    if duration <= 0.0 {
+                        // 瞬时移动：不建 tween，直接过。
+                        self.step += 1;
+                        continue;
+                    }
+
+                    return Outcome::Moving {
+                        sprite,
+                        from,
+                        to,
+                        duration,
+                        easing,
+                    };
                 }
             }
         }

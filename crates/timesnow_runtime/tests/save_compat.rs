@@ -23,6 +23,30 @@ use timesnow_runtime::config::Config;
 use timesnow_runtime::program::SaveData;
 use timesnow_runtime::script::{Script, Value};
 
+/// 测试用的临时目录。
+///
+/// **刻意不用 `std::env::temp_dir()`**：受限 shell 里真实 `%TEMP%`
+/// （`C:\Users\...\AppData\Local\Temp`）是只读的，会让一堆本来无关的
+/// 测试报 `PermissionDenied`。改用工作区内的 `target/tsn-tests/`——
+/// Cargo 自己就在那儿写东西，所以必定可写，`target/` 也已在 .gitignore 里。
+///
+/// 用运行时读 `CARGO_TARGET_DIR` 而不是 `env!`：Cargo 不会把它传给 rustc，
+/// `env!` 编译期拿不到。拿不到就退回 `CARGO_MANIFEST_DIR/../../target`
+/// （crate 在 `crates/<name>/`，往上两层是工作区根）。
+///
+/// 集成测试里 `CARGO_MANIFEST_DIR` 也是 crate 根（不是 tests/），
+/// 所以和单元测试里的同名 helper 指向同一个地方。
+fn test_dir(tag: &str) -> PathBuf {
+    let base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("tsn-tests");
+    let dir = base.join(format!("{tag}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// 最初的存档格式：只有 4 个字段，没有版本号、没有指纹。
 ///
 /// 这份文本不是手写的——是用当时的 `SaveData` 定义序列化出来的
@@ -226,8 +250,7 @@ fn every_field_is_covered() {
 // 兼容时就该有这条。
 
 fn fresh_project(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tsn_compat_{tag}_{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+    let dir = test_dir(tag);
     std::fs::create_dir_all(dir.join("saves")).unwrap();
     dir
 }

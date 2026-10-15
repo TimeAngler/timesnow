@@ -2,6 +2,7 @@ use super::error::ParseError;
 use super::lexer::{Line, Token, lex_file};
 use crate::script::{ArithOp, ChoiceOption, Cond, Expr, ScriptFile, Step, Value};
 use crate::suggest::suggestion_message;
+use crate::tween::Easing;
 use std::collections::HashMap;
 
 /// 所有合法的 `@指令`。
@@ -32,6 +33,7 @@ pub const DIRECTIVES: &[&str] = &[
     "exit",
     "title",
     "return_to_title",
+    "move",
 ];
 
 pub fn parse(input: &str) -> Result<ScriptFile, ParseError> {
@@ -292,6 +294,9 @@ impl Parser {
                     name,
                 });
             }
+            "move" => {
+                out.push(parse_move(&line.tokens[1..], line)?);
+            }
             other => {
                 let hint = suggestion_message(other, DIRECTIVES.iter().copied(), "指令");
                 return Err(ParseError {
@@ -502,6 +507,90 @@ fn parse_show(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
         y: y as f32,
         w: w as f32,
         h: h as f32,
+    })
+}
+
+fn parse_move(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
+    let sprite = match expect_token(tokens, 0, line, "立绘名")? {
+        Token::Ident(s) => s.clone(),
+        other => {
+            return Err(ParseError {
+                line: line.number,
+                column: line.indent + 1,
+                message: format!("@move 期望立绘名，得到 {other:?}"),
+                snippet: line.raw.clone(),
+            });
+        }
+    };
+
+    match expect_token(tokens, 1, line, "to")? {
+        Token::Ident(kw) if kw == "to" => {}
+        other => {
+            return Err(ParseError {
+                line: line.number,
+                column: line.indent + 1,
+                message: format!("@move 期望 `to`，得到 {other:?}"),
+                snippet: line.raw.clone(),
+            });
+        }
+    }
+
+    let x = parse_float(tokens, 2, line)?;
+    let y = parse_float(tokens, 3, line)?;
+    let w = parse_float(tokens, 4, line)?;
+    let h = parse_float(tokens, 5, line)?;
+
+    match expect_token(tokens, 6, line, "over")? {
+        Token::Ident(kw) if kw == "over" => {}
+        other => {
+            return Err(ParseError {
+                line: line.number,
+                column: line.indent + 1,
+                message: format!("@move 期望 `over`，得到 {other:?}"),
+                snippet: line.raw.clone(),
+            });
+        }
+    }
+
+    let duration = parse_float(tokens, 7, line)?;
+
+    // ease 可选；不写就是 linear
+    let easing = match tokens.get(8) {
+        None => Easing::Linear,
+        Some(Token::Ident(s)) => Easing::parse(s).ok_or_else(|| ParseError {
+            line: line.number,
+            column: line.indent + 1,
+            message: format!("未知缓动曲线 '{s}'，可用：linear / ease_in / ease_out / ease_in_out"),
+            snippet: line.raw.clone(),
+        })?,
+        Some(other) => {
+            return Err(ParseError {
+                line: line.number,
+                column: line.indent + 1,
+                message: format!("@move 的缓动参数应当是名字，得到 {other:?}"),
+                snippet: line.raw.clone(),
+            });
+        }
+    };
+
+    // 第九个 token 之后不该有东西
+    if let Some(extra) = tokens.get(9) {
+        return Err(ParseError {
+            line: line.number,
+            column: line.indent + 1,
+            message: format!("@move 后面还有多余的内容：{extra:?}"),
+            snippet: line.raw.clone(),
+        });
+    }
+
+    Ok(Step::Move {
+        sprite,
+        x: x as f32,
+        y: y as f32,
+        w: w as f32,
+        h: h as f32,
+        duration: duration as f32,
+        easing,
     })
 }
 
