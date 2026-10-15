@@ -4,6 +4,10 @@ A visual novel engine written in Rust, with its own DSL.
 
 [English](README.md) | [中文](README.zh-CN.md)
 
+![timesnow running the phone example: a sunset background with three choices and a textbox](docs/screenshot.png)
+
+*The [`examples/phone`](examples/phone) short story — choices, textbox, and a full-screen background.*
+
 ## Features
 
 - **Custom script DSL** (`.tsn`) — designed from the ground up for visual novels, with variables,

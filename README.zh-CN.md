@@ -4,6 +4,10 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
+![timesnow 跑起来的样子：夕阳背景、三个选项和对话框](docs/screenshot.png)
+
+*[`examples/phone`](examples/phone) 短篇——选项、对话框、全屏背景。*
+
 ## 特性
 
 - **自研剧本 DSL**（`.tsn`）——为视觉小说从零设计：变量、算术、条件、分支
