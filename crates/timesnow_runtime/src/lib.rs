@@ -7,6 +7,7 @@ pub mod saves;
 pub mod script;
 pub mod suggest;
 pub mod validate;
+pub mod vm;
 
 #[cfg(test)]
 mod vm_tests;
