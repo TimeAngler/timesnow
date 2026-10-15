@@ -138,6 +138,10 @@ pub enum Step {
     Stop {
         channel: String,
     },
+    /// 结束游戏（关窗口）
+    Quit,
+    /// 回到标题画面：把剧本从头重新加载
+    ReturnToTitle,
 }
 
 impl Step {
@@ -158,8 +162,31 @@ impl Step {
             Step::Fade { .. } => "fade",
             Step::Play { .. } => "play",
             Step::Stop { .. } => "stop",
+            Step::Quit => "quit",
+            Step::ReturnToTitle => "title",
         }
     }
+
+    /// 这一条是不是"交还给引擎"的控制指令
+    fn control(&self) -> Option<Control> {
+        match self {
+            Step::Quit => Some(Control::Quit),
+            Step::ReturnToTitle => Some(Control::ReturnToTitle),
+            _ => None,
+        }
+    }
+}
+
+/// 剧本交给引擎的控制指令。
+///
+/// 这些不是"画面上的事"，`Vm` 自己也做不了（关窗口、重建剧本都是 `App` 的活），
+/// 所以 `Vm` 只把它挂起来，由 `Script` 转交、`App` 执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// 结束游戏
+    Quit,
+    /// 回到标题画面
+    ReturnToTitle,
 }
 
 #[derive(Deserialize, Debug)]
@@ -232,6 +259,8 @@ pub struct Vm {
     backlog: Vec<HistoryEntry>,
     /// 最近的 `@chapter` 标签，存档时带上
     chapter: Option<String>,
+    /// 剧本挂起的控制指令（`@quit` / `@title`），由 `Script` 取走转交 `App`
+    pending_control: Option<Control>,
 }
 
 impl Vm {
@@ -248,12 +277,19 @@ impl Vm {
             pending_alpha: None,
             backlog: Vec::new(),
             chapter: None,
+            pending_control: None,
         }
     }
 
     /// 取走"要立刻生效的 alpha"（瞬时 `@fade` 留下的）
     pub fn take_pending_alpha(&mut self) -> Option<f32> {
         self.pending_alpha.take()
+    }
+
+    /// 取走剧本挂起的控制指令（`@quit` / `@title`）。
+    /// 取一次就没了——控制指令只该被执行一次。
+    pub fn take_control(&mut self) -> Option<Control> {
+        self.pending_control.take()
     }
 
     // ---------- 回看历史 ----------
@@ -425,6 +461,13 @@ impl Vm {
                         continue;
                     }
                     return Outcome::WaitingDuration(duration);
+                }
+                Step::Quit | Step::ReturnToTitle => {
+                    // 控制指令：挂起来交给 App，Vm 自己不做（也做不了）。
+                    // 位置推进到这一步之后，这样"回到标题"再回来时不会重复触发。
+                    self.pending_control = step.control();
+                    self.step += 1;
+                    return Outcome::Idle;
                 }
                 Step::Fade { to, duration } => {
                     if duration <= 0.0 {
@@ -640,6 +683,38 @@ impl Script {
         let outcome = script.vm.run_until_blocked();
         script.absorb(outcome);
         Ok(script)
+    }
+
+    /// 取走剧本挂起的控制指令（`@quit` / `@title`）
+    pub fn take_control(&mut self) -> Option<Control> {
+        self.vm.take_control()
+    }
+
+    /// 回到标题画面：从磁盘重新读一遍剧本，整份状态从头来。
+    ///
+    /// 为什么是"重新读文件"而不是"把 Vm 重置"：重新读顺便把
+    /// 热重载的 mtime 也刷新了，而且**改过的剧本会立刻生效**——
+    /// 作者改完剧情按一下回标题就能看到新的开头，比重启快。
+    ///
+    /// 顺带停掉 BGM：标题画面自己会 `@play bgm`，
+    /// 不停的话上一章的曲子会和标题曲叠在一起。
+    pub fn return_to_title(&mut self, config: &Config) -> Result<(), DslError> {
+        let (program, included) = Program::load(&self.main_path)?;
+
+        self.vm = Vm::new(program);
+        self.presentation = Presentation {
+            speed: config.text.speed,
+            ..Default::default()
+        };
+        self.file_mtimes = collect_mtimes(&included);
+        self.last_say = None;
+        self.bgm = None;
+        self.resumable_bgm = None;
+        self.vm.audio_events.push(AudioEvent::StopBgm);
+
+        let outcome = self.vm.run_until_blocked();
+        self.absorb(outcome);
+        Ok(())
     }
 
     // ---------- 给 app 的只读查询 ----------
@@ -1706,6 +1781,125 @@ mod tests {
         let path = std::env::temp_dir().join("tsn_definitely_missing_save.ron");
         let _ = std::fs::remove_file(&path);
         assert!(s.load_from(&path).is_err());
+    }
+
+    // ---------- 控制指令：@quit / @title ----------
+
+    /// 造一个真的写在磁盘上的剧本，返回 (Script, 目录)
+    /// `return_to_title` 要重新读文件，所以必须有个真文件
+    fn script_on_disk(tag: &str, src: &str) -> (Script, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tsn_title_{}_{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.tsn");
+        std::fs::write(&path, src).unwrap();
+        let config = Config::default();
+        let s = Script::load(&path, &config).expect("临时剧本应当能加载");
+        (s, dir)
+    }
+
+    /// `@quit` 由门面转交（App 拿它去关窗口）
+    #[test]
+    fn script_reports_a_pending_quit() {
+        let (mut s, dir) = script_on_disk("quit", ":: start\n@say \"下次再打吧。\"\n@quit\n");
+        assert!(s.take_control().is_none(), "还没翻到 @quit");
+
+        s.update(1.0);
+        s.advance(); // 翻过那句台词，走到 @quit
+        assert_eq!(s.take_control(), Some(Control::Quit));
+        assert!(s.take_control().is_none(), "取过一次就没了");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回到标题：位置、变量、历史、BGM 全部归零，从头开始
+    #[test]
+    fn return_to_title_resets_everything() {
+        let src = ":: title\n@say \"——标题——\"\n@choice\n    开始 -> start\n\n:: start\n@set hp = 9\n@play bgm main\n@say \"一\"\n@say \"二\"\n@title\n";
+        let (mut s, dir) = script_on_disk("reset", src);
+        s.take_audio_events(); // 让 Script 记住 BGM
+
+        // 先走一段，把状态弄"脏"：
+        // 翻过标题那句 → 出现选项 → 选"开始" → 往后走两句
+        s.update(1.0);
+        s.advance();
+        assert!(s.pending_choices().is_some(), "标题下应当有选项");
+        s.select_choice(0);
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("二"));
+        assert_eq!(s.vm.vars().get("hp"), Some(&Value::Int(9)));
+        assert!(!s.backlog().is_empty());
+
+        s.return_to_title(&Config::default()).expect("应当成功");
+
+        // 回到标题：位置、变量、历史都清了
+        assert_eq!(s.block(), "title", "应当回到标题块");
+        assert_eq!(s.vm.vars().get("hp"), None, "变量不该带过去");
+        assert!(s.backlog().is_empty(), "回看历史不该带过去");
+        assert!(s.chapter().is_none(), "章节标签不该带过去");
+        assert_eq!(
+            s.current_full_text().as_deref(),
+            Some("——标题——"),
+            "应当停在标题画面上"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回标题要停掉正在播的 BGM，否则会和标题曲叠在一起
+    #[test]
+    fn return_to_title_stops_the_music() {
+        let src = ":: start\n@play bgm main\n@say \"一\"\n@say \"二\"\n@title\n";
+        let (mut s, dir) = script_on_disk("bgm", src);
+        s.take_audio_events();
+
+        s.return_to_title(&Config::default()).expect("应当成功");
+        let events = s.take_audio_events();
+        assert!(
+            events.iter().any(|e| matches!(e, AudioEvent::StopBgm)),
+            "回标题应当带上一条 StopBgm，实际有 {} 条事件",
+            events.len()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回标题会重新读文件：作者改完剧情按一下就能看到新开头
+    #[test]
+    fn return_to_title_picks_up_edits_on_disk() {
+        let (mut s, dir) = script_on_disk("reload", ":: start\n@say \"旧开头\"\n@title\n");
+        assert_eq!(s.current_full_text().as_deref(), Some("旧开头"));
+
+        // 作者改了开头
+        std::fs::write(
+            dir.join("script.tsn"),
+            ":: start\n@say \"新开头\"\n@title\n",
+        )
+        .unwrap();
+
+        s.return_to_title(&Config::default()).expect("应当成功");
+        assert_eq!(
+            s.current_full_text().as_deref(),
+            Some("新开头"),
+            "回标题应当读到改过的剧本"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回标题时剧本读不出来了 → 返回错误，让 App 去显示错误页（不能 panic）
+    #[test]
+    fn return_to_title_reports_a_broken_script() {
+        let (mut s, dir) = script_on_disk("broken", ":: start\n@say \"好的\"\n@title\n");
+        std::fs::write(dir.join("script.tsn"), ":: start\n@jump 不存在的块\n").unwrap();
+
+        assert!(
+            s.return_to_title(&Config::default()).is_err(),
+            "剧本坏了应当返回错误，而不是默默失败"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ---------- 存档：停在选项上 ----------

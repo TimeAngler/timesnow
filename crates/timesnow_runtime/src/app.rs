@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::saves::{self, SLOT_COUNT, SlotInfo};
-use crate::script::{AudioEvent, Script};
+use crate::script::{AudioEvent, Control, Script};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -1154,6 +1154,40 @@ impl ApplicationHandler for App {
                             if let Err(e) = self.audio.play_se(&name) {
                                 eprintln!("播放音效失败: {e}");
                             }
+                        }
+                    }
+                }
+
+                // 剧本挂起的控制指令（@quit / @title）。
+                // 放在音频事件之后：`@title` 自己会推一条 StopBgm，
+                // 那条也得先被处理掉。
+                if let Some(control) = script.take_control() {
+                    match control {
+                        Control::Quit => {
+                            println!("剧本请求退出，再见。");
+                            // 直接退进程：这里只拿得到 &mut self，
+                            // 拿不到 event_loop 去调 exit()
+                            std::process::exit(0);
+                        }
+                        Control::ReturnToTitle => {
+                            let config = self.config.clone();
+                            return match script.return_to_title(&config) {
+                                Ok(()) => {
+                                    println!("已回到标题画面");
+                                    self.screen = Screen::Playing;
+                                    self.mode = AdvanceMode::Manual;
+                                    self.last_advance = Instant::now();
+                                    self.needs_redraw = true;
+                                }
+                                Err(e) => {
+                                    // 回标题时剧本读不出来了：进错误页，
+                                    // 改好文件会自动恢复
+                                    eprintln!("回到标题失败:\n{e}");
+                                    self.script_error = Some(e.to_string());
+                                    self.error_since = Some(Instant::now());
+                                    self.needs_redraw = true;
+                                }
+                            };
                         }
                     }
                 }

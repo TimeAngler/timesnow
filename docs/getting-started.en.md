@@ -407,6 +407,32 @@ Put a line in your script and the save screen will show the chapter name:
 
 It only gives saves a readable label; it doesn't change what's on screen.
 
+### How do I end the game / return to the title?
+
+```
+@quit     end the game (closes the window)
+@title    return to the title screen
+```
+
+Put `@quit` after an ending. `@title` re-reads the script, clears variables and the backlog, and
+stops the music — so a replayable title screen is just these two lines:
+
+```
+:: title
+@say "——我的游戏——"
+@choice
+    开始 -> ch1
+    退出 -> bye
+
+:: bye
+@say "下次再见。"
+@fade to 0.0 1.5
+@quit
+```
+
+`@title` **re-reads the file**, so after editing your story you can press it to see the new opening
+without restarting.
+
 ### All the keys
 
 | Key | Action |

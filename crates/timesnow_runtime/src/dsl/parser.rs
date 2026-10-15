@@ -177,6 +177,13 @@ impl Parser {
             "clear" => {
                 out.push(Step::Clear);
             }
+            // 结束游戏 / 回到标题。两条都不带参数，写全名或简写都认。
+            "quit" | "exit" => {
+                out.push(Step::Quit);
+            }
+            "title" | "return_to_title" => {
+                out.push(Step::ReturnToTitle);
+            }
             "fade" => {
                 // 期望 `to`
                 match expect_token(&line.tokens[1..], 0, line, "to")? {

@@ -6,7 +6,7 @@ use std::time::SystemTime;
 /// - 缺字段 → 用默认值，不报错
 /// - 整个 `config.toml` 缺失 → 全默认 + 一条提示，不再 panic
 /// - 多写的未知字段 → 忽略
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct Config {
     pub window: WindowConfig,
@@ -84,7 +84,7 @@ pub const AUDIO_ROWS: usize = 4;
 /// 设置界面每次按键调整的步长
 pub const AUDIO_STEP: f32 = 0.05;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct WindowConfig {
     pub title: String,
@@ -92,7 +92,7 @@ pub struct WindowConfig {
     pub height: u32,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct TextboxConfig {
     pub x: f32,
@@ -101,7 +101,7 @@ pub struct TextboxConfig {
     pub h: f32,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct TextConfig {
     pub font_size: f32,
@@ -119,7 +119,7 @@ pub struct TextConfig {
     pub name_color: [u8; 3],
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct ChoiceConfig {
     pub x: f32,

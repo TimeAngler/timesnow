@@ -8,7 +8,7 @@
 //! 应该能独立验证。
 
 use crate::program::Program;
-use crate::script::{AudioEvent, BACKLOG_LIMIT, Outcome, Step, Value, Vm};
+use crate::script::{AudioEvent, BACKLOG_LIMIT, Control, Outcome, Step, Value, Vm};
 
 /// 从一段源码搭一个跑起来的 Vm（已推进到第一个阻塞点）
 fn vm(src: &str) -> Vm {
@@ -389,4 +389,74 @@ fn clear_pending_choice_drops_the_options() {
     assert!(vm.pending_choice().is_some());
     vm.clear_pending_choice();
     assert!(vm.pending_choice().is_none());
+}
+
+// ---------- 控制指令：@quit / @title ----------
+
+/// `@quit` 不该自己关窗口（Vm 也做不到），而是把指令挂起来交给 App
+#[test]
+fn quit_is_reported_as_a_control_command() {
+    let mut vm = vm(":: start\n@say \"下次再打吧。\"\n@quit\n");
+    assert_eq!(vm.take_control(), None, "还没走到 @quit，不该有指令");
+
+    // 翻过那句台词才轮到 @quit
+    vm.advance();
+    assert_eq!(vm.take_control(), Some(Control::Quit));
+}
+
+/// 取过的控制指令不能重复触发，否则"回到标题"会反复重来
+#[test]
+fn control_is_taken_only_once() {
+    let mut vm = vm(":: start\n@quit\n");
+    assert_eq!(vm.take_control(), Some(Control::Quit));
+    assert_eq!(vm.take_control(), None, "取第二次应当是空的");
+    // 再跑一遍也不该又冒出来（位置已经推过去了）
+    vm.run_until_blocked();
+    assert_eq!(vm.take_control(), None);
+}
+
+#[test]
+fn return_to_title_is_reported_as_a_control_command() {
+    let mut vm = vm(":: start\n@say \"完\"\n@title\n");
+    vm.advance();
+    assert_eq!(vm.take_control(), Some(Control::ReturnToTitle));
+}
+
+/// 简写也要认
+#[test]
+fn control_commands_accept_their_aliases() {
+    for (src, expected) in [
+        (":: start\n@quit\n", Control::Quit),
+        (":: start\n@exit\n", Control::Quit),
+        (":: start\n@title\n", Control::ReturnToTitle),
+        (":: start\n@return_to_title\n", Control::ReturnToTitle),
+    ] {
+        let mut vm = vm(src);
+        assert_eq!(vm.take_control(), Some(expected), "这个写法没被认出: {src}");
+    }
+}
+
+/// 控制指令是终结性的：走到它就把指令交出去，不再往后跑
+#[test]
+fn execution_stops_at_a_control_command() {
+    // 用 fresh_vm：`vm()` 会在构造时就跑一遍，把控制指令提前消费掉
+    let mut vm = fresh_vm(":: start\n@quit\n@say \"后面还有一句\"\n");
+    // 跑到 @quit 就停下（Idle = 没有可推进的东西了）
+    assert_eq!(vm.run_until_blocked(), Outcome::Idle);
+    assert_eq!(vm.take_control(), Some(Control::Quit));
+    assert_eq!(vm.step_index(), 1, "光标应当停在 @quit 那一条上");
+
+    // 再调用一次才会继续往后（这时 App 早就把进程关掉了）
+    assert_eq!(vm.run_until_blocked(), Outcome::WaitingInput);
+}
+
+/// 控制指令也要进指纹（不然改剧本时存档兼容性会算错）
+#[test]
+fn control_commands_appear_in_the_fingerprint() {
+    let a = Program::from_source(":: start\n@say \"甲\"\n").unwrap();
+    let b = Program::from_source(":: start\n@say \"甲\"\n@quit\n").unwrap();
+    assert_ne!(
+        a.fingerprint, b.fingerprint,
+        "多了一条 @quit 结构就变了，指纹必须不同"
+    );
 }
