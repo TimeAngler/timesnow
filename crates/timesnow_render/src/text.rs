@@ -120,6 +120,28 @@ impl TextRenderer {
         self.add_boxed(text, x, y, scale, color, None);
     }
 
+    /// 带换行的调试文字：错误信息里有超长路径和整行剧本，必须能折行。
+    pub fn add_debug_wrapped(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: (u8, u8, u8),
+        max_width: f32,
+    ) {
+        const OFFSET: f32 = 0.0015;
+        self.add_boxed(
+            text,
+            x + OFFSET,
+            y + OFFSET,
+            scale,
+            OUTLINE_COLOR,
+            Some(max_width),
+        );
+        self.add_boxed(text, x, y, scale, color, Some(max_width));
+    }
+
     fn add_boxed(
         &mut self,
         text: &str,

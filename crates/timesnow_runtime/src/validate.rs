@@ -1,4 +1,5 @@
 use crate::assets;
+use crate::config::Config;
 use crate::dsl::{self, DslError};
 use crate::script::{Cond, ScriptFile, Step};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,7 @@ pub fn validate(project_dir: &Path) -> Report {
             message: "找不到剧本文件".into(),
             snippet: None,
         });
+        diagnostics.extend(config_diagnostics(project_dir));
         return Report {
             diagnostics,
             script: None,
@@ -91,6 +93,8 @@ pub fn validate(project_dir: &Path) -> Report {
         Ok(x) => x,
         Err(e) => {
             diagnostics.push(from_dsl_error(&e));
+            // 剧本坏了也不妨碍顺手看一眼配置
+            diagnostics.extend(config_diagnostics(project_dir));
             return Report {
                 diagnostics,
                 script: None,
@@ -98,6 +102,9 @@ pub fn validate(project_dir: &Path) -> Report {
             };
         }
     };
+
+    // 剧本没问题，但配置写坏了窗口里同样只会看到错误页——一起报出来
+    diagnostics.extend(config_diagnostics(project_dir));
 
     check_assets(project_dir, &script, &mut diagnostics);
     check_variables(&script, &mut diagnostics);
@@ -119,6 +126,39 @@ fn from_dsl_error(e: &DslError) -> Diagnostic {
         } else {
             Some(e.snippet.clone())
         },
+    }
+}
+
+/// 校验 `config.toml`。
+///
+/// - 文件不存在 → 只是提示（引擎会用默认值，能正常跑）
+/// - 文件存在但 TOML 写坏 / 字段类型不对 → 错误。这种情况窗口里只有一页错误，
+///   在 `--check` 里报出来最省事。
+fn config_diagnostics(project_dir: &Path) -> Vec<Diagnostic> {
+    let config_path = project_dir.join("config.toml");
+    let location = config_path.display().to_string();
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => {
+            return vec![Diagnostic {
+                level: DiagnosticLevel::Warning,
+                location,
+                message: "没有 config.toml，将使用默认配置".into(),
+                snippet: None,
+            }];
+        }
+    };
+
+    match toml::from_str::<Config>(&content) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![Diagnostic {
+            level: DiagnosticLevel::Error,
+            location,
+            // e 的 Display 带行列和字段名，比 e.message() 有用（message() 只说类型不对）
+            message: format!("config.toml 解析失败: {e}"),
+            snippet: None,
+        }],
     }
 }
 
@@ -278,5 +318,121 @@ fn collect_cond_vars<'a>(cond: &'a Cond, out: &mut BTreeSet<&'a str>) {
                 collect_cond_vars(c, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// 每个用例一个独立目录（测试并行跑，不能共用）
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tsn_validate_{tag}_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// 诊断摘要，方便断言和失败时看
+    fn summary(report: &Report) -> Vec<String> {
+        report.diagnostics.iter().map(|d| d.to_string()).collect()
+    }
+
+    #[test]
+    fn missing_config_is_only_a_warning() {
+        let dir = fresh_dir("no_config");
+        write(&dir, "script.tsn", ":: start\n@say \"你好\"\n");
+
+        let report = validate(&dir);
+        assert!(
+            !report.has_errors(),
+            "缺 config.toml 不该算错：{:?}",
+            summary(&report)
+        );
+        assert_eq!(report.warning_count(), 1);
+        assert!(report.diagnostics[0].message.contains("默认配置"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn valid_config_produces_no_diagnostic() {
+        let dir = fresh_dir("good_config");
+        write(&dir, "script.tsn", ":: start\n@say \"你好\"\n");
+        write(
+            &dir,
+            "config.toml",
+            "[window]\ntitle = \"测试\"\nwidth = 800\n",
+        );
+        let report = validate(&dir);
+        assert!(report.diagnostics.is_empty(), "{:?}", summary(&report));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn broken_config_is_an_error() {
+        let dir = fresh_dir("bad_config");
+        write(&dir, "script.tsn", ":: start\n@say \"你好\"\n");
+        // 字段类型写错：font_size 应该是数字
+        write(&dir, "config.toml", "[text]\nfont_size = \"很大\"\n");
+
+        let report = validate(&dir);
+        assert!(report.has_errors(), "配置写坏要被 --check 抓到");
+        let d = &report.diagnostics[0];
+        assert_eq!(d.level, DiagnosticLevel::Error);
+        assert!(d.location.ends_with("config.toml"), "实际: {}", d.location);
+        assert!(
+            d.message.contains("config.toml 解析失败"),
+            "实际: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("font_size") || d.message.contains("line"),
+            "错误信息要能定位，实际: {}",
+            d.message
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn config_error_is_reported_even_when_script_is_broken() {
+        let dir = fresh_dir("both_broken");
+        write(&dir, "script.tsn", ":: start\n@say 小雪 你好\n"); // 缺引号
+        write(&dir, "config.toml", "[window\n");
+
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("script.tsn")),
+            "剧本错误要报：{text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("config.toml")),
+            "剧本坏了也要顺手报配置问题：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_script_is_reported() {
+        let dir = fresh_dir("no_script");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        let report = validate(&dir);
+        assert!(report.has_errors());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("找不到剧本文件"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

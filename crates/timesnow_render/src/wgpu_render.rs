@@ -215,6 +215,20 @@ impl WgpuRenderer {
         self.text.add_debug(text, x, y, scale, color);
     }
 
+    /// 同上，但超过 `max_width`（像素）会换行。错误信息里常有超长路径。
+    pub fn add_debug_text_wrapped(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: (u8, u8, u8),
+        max_width: f32,
+    ) {
+        self.text
+            .add_debug_wrapped(text, x, y, scale, color, max_width);
+    }
+
     pub fn load_sprite(&mut self, name: &str, bytes: &[u8]) {
         self.sprite.load(&self.device, &self.queue, name, bytes);
     }

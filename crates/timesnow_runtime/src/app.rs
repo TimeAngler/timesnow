@@ -16,6 +16,9 @@ use winit::window::{Window, WindowAttributes, WindowId};
 /// 错误页最多铺多少行，超出的截断（具体数目在渲染时按窗口高度再收紧）
 const ERROR_PAGE_MAX_LINES: usize = 40;
 
+/// 错误页每行的高度（像素）。配合自动换行用。
+const ERROR_LINE_HEIGHT_PX: f32 = 18.0;
+
 /// 错误页下多久查一次"文件改好了没"。太密会白烧 CPU，太疏显得卡。
 const ERROR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -84,9 +87,14 @@ impl App {
 
         let watched = if script.is_none() {
             // 剧本没解析成功时无从知道它 include 了哪些文件（解析就失败在这一步），
-            // 所以把所有 .tsn 都盯上。一个项目的剧本文件数量很少，
-            // 每帧比 mtime 的代价可以忽略。
-            watch_all_scripts(project_dir)
+            // 所以把所有 .tsn 都盯上；配置文件也要盯，它同样可能是错误来源。
+            // 一个项目的剧本文件数量很少，每帧比 mtime 的代价可以忽略。
+            let mut w = watch_all_scripts(project_dir);
+            w.push((
+                project_dir.join("config.toml"),
+                mtime_of(&project_dir.join("config.toml")),
+            ));
+            w
         } else {
             Vec::new()
         };
@@ -188,7 +196,10 @@ impl App {
     }
 
     /// 错误页：深色底 + 红字。不依赖任何资源，所以即使 assets 是空的也能显示。
-    fn draw_error_page(&mut self, _width: u32, height: u32) {
+    ///
+    /// 错误信息里有文件名、超长路径、整行剧本，所以必须自动换行——
+    /// 以前不换行，长行会直接伸出屏幕右边。
+    fn draw_error_page(&mut self, width: u32, height: u32) {
         let detail = self.script_error.clone().unwrap_or_default();
         let lines = error_page_lines(&detail);
 
@@ -202,8 +213,11 @@ impl App {
         r.clear_background();
         r.set_alpha(1.0);
 
-        let line_h = 18.0 / height.max(1) as f32;
+        let line_h = ERROR_LINE_HEIGHT_PX / height.max(1) as f32;
         let max_lines = ((0.92 / line_h).floor() as usize).min(ERROR_PAGE_MAX_LINES);
+
+        // 左右各留 3% 边距，剩下的宽度给文字盒（单位：像素，交给换行用）
+        let text_width_px = (width as f32 * 0.94).max(1.0);
 
         for (i, line) in lines.iter().take(max_lines).enumerate() {
             let y = 0.04 + i as f32 * line_h;
@@ -213,7 +227,7 @@ impl App {
             } else {
                 (255, 150, 150)
             };
-            r.add_debug_text(line, 0.03, y, 1.0, color);
+            r.add_debug_text_wrapped(line, 0.03, y, 1.0, color, text_width_px);
         }
 
         r.render();
@@ -662,5 +676,24 @@ mod tests {
             redraw_after(true, true, Some(Instant::now())),
             ControlFlow::Poll
         ));
+    }
+
+    /// 错误页的长行必须交给换行处理，不能伸出屏幕。
+    /// 这里钉住"文字盒宽度 = 窗口宽度的 94%"这条约定，以及行高换算。
+    #[test]
+    fn error_page_layout_wraps_within_the_window() {
+        // 与 draw_error_page 里的算法保持一致
+        let text_width_px = |w: u32| (w as f32 * 0.94).max(1.0);
+        assert!((text_width_px(1920) - 1804.8).abs() < 0.1);
+        assert!(text_width_px(1920) < 1920.0, "必须留出边距");
+        assert!(text_width_px(0) >= 1.0, "宽度为 0 时不能算出 0 或负数");
+
+        // 行高换算：720p 下大约能铺 36 行，且不超过硬上限
+        let line_h = ERROR_LINE_HEIGHT_PX / 720.0_f32;
+        let max_lines = ((0.92 / line_h).floor() as usize).min(ERROR_PAGE_MAX_LINES);
+        assert!(
+            max_lines > 20 && max_lines <= ERROR_PAGE_MAX_LINES,
+            "实际 {max_lines}"
+        );
     }
 }

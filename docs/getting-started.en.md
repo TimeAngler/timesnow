@@ -240,7 +240,8 @@ Drop a song into `assets/audio/bgm/`, say `main.mp3`. Add:
 - Add a `@choice` option → visible the next time you reach it
 
 **A broken script won't crash the game — and won't leave you staring at a black screen.**
-The window shows a red error page telling you **which file and which line** is wrong:
+The window shows a red error page telling you **which file and which line** is wrong.
+Long lines wrap, so nothing runs off the right edge.
 
 ```
 timesnow —— 剧本有问题，游戏已暂停
@@ -268,12 +269,13 @@ No window, no GPU:
 cargo run -- --check
 ```
 
-It does four things:
+It does five things:
 
 - Parses the script (every `@include`d file) and reports errors with **exact file:line:column**
 - Verifies every `@jump` / `@if` / `@choice` target block exists
 - Verifies referenced backgrounds / sprites / BGM / SFX exist under `assets/`
 - Flags variables that are read but never set (those branches can never be taken)
+- Parses `config.toml`, catching bad field types and unclosed brackets with line/column
 
 Exits with code `1` when there are errors, so it drops straight into CI:
 
@@ -286,7 +288,21 @@ warning script.tsn: 引用了不存在的背景 'missing_bg'：assets 里没有�
 1 个错误，1 个警告。
 ```
 
-Assets you simply haven't made yet are reported as **warnings**, so they don't block you.
+A broken config looks like this:
+
+```
+$ cargo run -- --check
+error examples/phone/config.toml: config.toml 解析失败: TOML parse error at line 13, column 13
+   |
+13 | font_size = "很大"
+   |             ^^^^^^^^
+invalid type: string "很大", expected f32
+
+1 个错误，0 个警告。
+```
+
+Assets you simply haven't made yet are reported as **warnings**, so they don't block you;
+a missing `config.toml` is only a warning too (the engine falls back to defaults).
 
 
 ## FAQ
