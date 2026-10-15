@@ -463,18 +463,18 @@ impl App {
         r.render();
     }
 
-    /// 屏幕提示（"已存档到槽位 3"这种），若干秒后自己消失
-    fn draw_toast(&mut self) {
-        let Some((text, since)) = self.toast.clone() else {
-            return;
-        };
-        if since.elapsed() > TOAST_DURATION {
+    /// 提示条是否还要显示；过期就清掉（并且不再要求出帧）。
+    fn expire_toast(&mut self) {
+        if let Some((_, since)) = &self.toast
+            && since.elapsed() > TOAST_DURATION
+        {
             self.toast = None;
-            return;
         }
-        if let Some(r) = self.renderer.as_mut() {
-            r.add_debug_text(&text, 0.04, 0.955, 1.0, (200, 255, 200));
-        }
+    }
+
+    /// 提示条那一行文字（要跟主画面画进同一帧，不能单独 render）
+    fn toast_text(&self) -> Option<String> {
+        self.toast.as_ref().map(|(t, _)| t.clone())
     }
 
     /// 处理攒下来的动作（要同时碰 script / audio / window，所以不能在事件匹配里直接做）
@@ -773,6 +773,11 @@ impl ApplicationHandler for App {
         // 输入、缩放都要重画一帧
         self.needs_redraw = true;
 
+        // 允许这一轮事件渲染一帧（渲染器会拒绝同一轮的第二次 render）
+        if let Some(r) = self.renderer.as_mut() {
+            r.reset_frame_guard();
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -816,17 +821,17 @@ impl ApplicationHandler for App {
                 match self.screen {
                     Screen::Backlog { scroll } => {
                         self.draw_backlog(width, height, scroll);
-                        self.draw_toast();
+                        self.expire_toast();
                         return;
                     }
                     Screen::SaveMenu { cursor } => {
                         self.draw_slots(height, SlotMode::Save, cursor);
-                        self.draw_toast();
+                        self.expire_toast();
                         return;
                     }
                     Screen::LoadMenu { cursor } => {
                         self.draw_slots(height, SlotMode::Load, cursor);
-                        self.draw_toast();
+                        self.expire_toast();
                         return;
                     }
                     Screen::Playing => {}
@@ -836,6 +841,9 @@ impl ApplicationHandler for App {
                     // 配置变了，让 renderer 和 script 都感知
                     self.apply_config();
                 }
+
+                // 提示条文字先取出来（下面 script 会长期借用 self，不能再读 self）
+                let toast_text = self.toast_text();
 
                 // 走到这里 script 一定有值；保险起见取不到就直接重试加载
                 let Some(script) = self.script.as_mut() else {
@@ -926,20 +934,26 @@ impl ApplicationHandler for App {
                     }
 
                     r.set_alpha(alpha);
+
+                    // 提示条跟主画面一起画，**不能**在这里之后再 render 一次：
+                    // 一帧里向 swapchain 要两张纹理并 present 两次会闪。
+                    if let Some(text) = &toast_text {
+                        let ui = ui_metrics(height, t.font_size);
+                        r.add_ui_text_wrapped(
+                            text,
+                            0.04,
+                            1.0 - ui.line_h * 1.8,
+                            ui.size_scale,
+                            (200, 255, 200),
+                            width as f32 * 0.92,
+                        );
+                    }
+
                     r.render();
                 }
 
                 // 还在演出中（打字机/等待/淡入淡出）就再排一帧
                 let animating = script.is_animating();
-
-                // 提示条盖在最上面。要在 script 的可变借用结束之后画。
-                if self.toast.is_some() {
-                    self.draw_toast();
-                    if let Some(r) = self.renderer.as_mut() {
-                        r.render();
-                    }
-                    // 提示还在显示 → 需要继续出帧（它自己会过期）
-                }
 
                 self.needs_redraw = animating || self.toast.is_some();
             }

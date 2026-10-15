@@ -16,6 +16,10 @@ pub struct WgpuRenderer {
     ui: Vec<(String, Rect)>,
     /// 带着色的 UI 块（名字, 位置, tint）。在普通 UI 之后画，作为覆盖层。
     ui_tinted: Vec<(String, Rect, [f32; 3])>,
+
+    /// 本次窗口事件里是否已经渲染过一帧。
+    /// 由 `window_event` 在开头发 `reset_frame_guard()` 清掉。
+    rendered_this_event: bool,
 }
 
 impl WgpuRenderer {
@@ -87,6 +91,7 @@ impl WgpuRenderer {
             characters: Vec::new(),
             ui: Vec::new(),
             ui_tinted: Vec::new(),
+            rendered_this_event: false,
         }
     }
 
@@ -98,7 +103,21 @@ impl WgpuRenderer {
         }
     }
 
+    /// 每处理一个窗口事件前调用一次，允许这一轮渲染一帧。
+    pub fn reset_frame_guard(&mut self) {
+        self.rendered_this_event = false;
+    }
+
     pub fn render(&mut self) {
+        // 一次 `render()` = 一次 `get_current_texture()` + 一次 `present()`。
+        // 调用方在同一个窗口事件里调两次会向 swapchain 连要两张纹理，
+        // 表现就是画面一闪一闪。这里直接拒绝第二次，把问题暴露在日志里。
+        if self.rendered_this_event {
+            eprintln!("警告：一次窗口事件里调了两次 render()，第二次已忽略（会导致闪烁）");
+            return;
+        }
+        self.rendered_this_event = true;
+
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
