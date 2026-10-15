@@ -4,12 +4,22 @@ This guide walks you through creating a timesnow project from scratch and gettin
 
 Estimated time: **5 minutes**.
 
+- **Prerequisites**
+- **Part 1: Follow along** (steps 1–7, from an empty directory to text in a window)
+- **Part 2: Keep going** (backgrounds, sprites, branching, music)
+- **Part 3: Reference** (hot reload, `--check`, controls, save/load, settings)
+- **Part 4: Troubleshooting**
+
 ## Prerequisites
 
-- **Rust 1.75+** — `rustc --version` should print a version
+- **Rust 1.85+** — the engine uses Rust 2024 edition; check with `rustc --version`
 - **A PNG image** (optional) — for a background. It runs without one, just on a black screen
 
 If Rust isn't installed, go to https://rustup.rs and follow the instructions.
+
+---
+
+# Part 1: Follow along
 
 ## 1. Create a project
 
@@ -24,7 +34,7 @@ In `Cargo.toml`, under `[dependencies]`:
 
 ```toml
 [dependencies]
-timesnow = { git = "https://github.com/TimeAngler/timesnow", tag = "v0.1.0" }
+timesnow = { git = "https://github.com/TimeAngler/timesnow", branch = "main" }
 anyhow = "1"
 ```
 
@@ -39,13 +49,14 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-**That's all.** The engine's entry point doesn't take any business logic — the project root is the directory containing `Cargo.toml`, and the engine looks for scripts, config, and assets there.
+**That's all.** The engine's entry point doesn't take any business logic — the project root is the
+directory containing `Cargo.toml`, and the engine looks for scripts, config, and assets there.
 
 ## 4. Write the script
 
 Create `script.tsn` in the project root (next to `Cargo.toml`):
 
-```
+```tsn
 :: start
 @say "Hello, world."
 @say "This is the first scene of timesnow."
@@ -60,9 +71,167 @@ Create `script.tsn` in the project root (next to `Cargo.toml`):
 - `@wait 1.0` waits one second.
 - The file extension must be `.tsn`.
 
-## 5. Write the config
+## 5. Write the config (optional)
 
-Create `config.toml` in the project root:
+`config.toml` is **not required** — without it the defaults apply. Create one when you want to
+change the window title, font size, typewriter speed, and so on:
+
+```toml
+[window]
+title = "My Game"
+width = 1280
+height = 720
+```
+
+**Every field is optional.** See the [config reference](#config-reference) below for the full table
+and the defaults.
+
+## 6. Create the asset directories (optional)
+
+```text
+assets/
+├── bg/           # backgrounds
+├── character/    # character sprites
+├── ui/           # UI elements (textbox, ...)
+└── audio/
+    ├── bgm/      # music
+    └── se/       # sound effects
+```
+
+**The directory names matter.** The engine scans assets by this structure. You can nest further:
+`assets/bg/chapter1/village.png` becomes the sprite name `chapter1_village`.
+
+> Older docs used `assets/char/`. The engine still accepts that name, but only when `character/`
+> doesn't exist — prefer the new name.
+
+**It runs without `assets/` too**: black screen, but the text still shows.
+
+## 7. Run it
+
+```bash
+cargo run
+```
+
+The first build takes a few minutes. When it finishes, a window opens showing your text.
+
+**You're up and running.**
+
+---
+
+# Part 2: Keep going
+
+## Add a background
+
+Drop a 16:9 image into `assets/bg/`, say `village.png`. Then in the script:
+
+```tsn
+:: start
+@scene village
+@say "You arrive at a village."
+```
+
+**Nothing to configure** — the filename is the sprite name.
+
+## Add a character sprite
+
+Drop a PNG into `assets/character/`, say `alice.png`. Then:
+
+```tsn-fragment
+@show alice at 0.55 0.10 0.40 0.85
+@say alice "Hello."
+```
+
+The four numbers after `at` are **x y w h**, all normalized 0–1. `0.55 0.10 0.40 0.85` means
+"right side of the screen, starting 10% from the top, 40% wide, 85% tall".
+
+## Add branching
+
+```tsn
+:: start
+@say "You see someone."
+@choice
+    打招呼 -> greet
+    走开 -> leave
+
+:: greet
+@say "You walk over."
+@jump end
+
+:: leave
+@say "You turn and leave."
+@jump end
+
+:: end
+@say "The story ends."
+```
+
+## Add variables and conditions
+
+```tsn
+:: start
+@set 好感 = 0
+@say "You say hello."
+@set 好感 = 好感 + 1
+
+@if 好感 >= 1
+    @say "She smiles."
+@else
+    @say "She ignores you."
+```
+
+The right-hand side of `@set` can be an arithmetic expression (`+ - * / %`, parentheses) and can
+reference other variables. See [`dsl.md`](dsl.md) for the full rules.
+
+## Add music
+
+Drop a track into `assets/audio/bgm/`, say `main.mp3`. Then:
+
+```tsn-fragment
+@play bgm main      # or the shorthand: @bgm main
+```
+
+**Music loops.** Sound effects work the same way: put them in `assets/audio/se/` and use
+`@play se 名字` (or `@se 名字`).
+
+## Add a replayable title screen
+
+```tsn
+:: title
+@scene 标题背景
+@play bgm 标题曲
+@say "—— My Game ——"
+@choice
+    开始 -> ch1
+    退出 -> bye
+
+:: ch1
+@chapter "Chapter 1"
+@say "(your first chapter goes here)"
+@jump bye
+
+:: bye
+@say "See you next time."
+@fade to 0.0 1.5
+@quit
+```
+
+This example can be pasted into `script.tsn` and run as-is: **the first block, `:: title`, is the
+entry point**, so the title screen is what you see first. To make endings replayable, change an
+ending's `@jump bye` to `@title`.
+
+- `@quit` ends the game (closes the window)
+- `@title` returns to the title screen: it re-reads the script, clears variables and the backlog,
+  and stops the music
+- `@chapter "Chapter 1"` only gives saves a readable label; it doesn't change what's on screen
+
+---
+
+# Part 3: Reference
+
+## Config reference
+
+A complete `config.toml` (**these are the defaults** — paste the whole thing or keep only the lines
+you want to change):
 
 ```toml
 [window]
@@ -95,25 +264,30 @@ x = 0.20
 w = 0.60
 h = 0.08
 gap = 0.02
-# vertical center of the whole choice group; 0.5 = middle of the screen
+# vertical center of the choice group; 0.5 = middle of the screen
 y_center = 0.5
 text_pad_x = 0.05
 text_pad_y = 0.30
 color = [220, 220, 220]
-```
 
-**Copy and paste this as-is.** What each field means:
+[audio]
+# volume, 0.0 ~ 1.0
+master = 0.8
+bgm = 0.7
+se = 0.9
+muted = false
+```
 
 | Section | Field | Meaning |
 |---|---|---|
 | `[window]` | `title` | Window title |
 | | `width` / `height` | Initial window size (changing this needs a restart) |
-| `[textbox]` | `x y w h` | Textbox background position and size (normalized 0~1) |
-| `[text]` | `font_size` | Body text size |
+| `[textbox]` | `x y w h` | Textbox backdrop position and size (normalized 0–1) |
+| `[text]` | `font_size` | Body font size |
 | | `line_height` | Line height, usually `font_size × 1.3` |
 | | `x` / `y` | Text position (normalized) |
 | | `color` | Text RGB |
-| | `speed` | Typewriter speed, seconds per character; `0` disables the typewriter |
+| | `speed` | Typewriter speed in seconds per character; `0` disables it |
 | | `name_*` | Speaker name styling |
 | `[choice]` | `x w h gap` | Choice layout |
 | | `y_center` | Vertical center of the choice group, `0.5` = middle of the screen |
@@ -123,43 +297,17 @@ color = [220, 220, 220]
 | | `bgm` / `se` | Music / sound-effect volume |
 | | `muted` | Mute switch |
 
-**Every field is optional — omit it and you get the default.** The values above *are* the defaults,
-so you can paste the whole block or keep only the lines you want to change.
 Body text wraps automatically at the textbox width.
 
-**Change any of these, save, and the game updates instantly — no restart, no rebuild.**
+## Textbox backdrop
 
-**Volume can be changed in-game:** press `Esc` or `O` for the settings screen, arrow keys to pick
-and adjust; it writes back to `config.toml` when you leave (note: writing back re-serializes the whole
-file, so **your comments are lost**).
+If you want the textbox to have a backdrop, put a semi-transparent PNG at
+`assets/ui/textbox.png`.
 
-## 6. Create the asset directories
+**It runs without one** — the textbox area is just transparent and the text floats over the
+background.
 
-In the project root:
-
-```
-assets/
-├── bg/           # backgrounds
-├── character/    # character sprites
-├── ui/           # UI elements (textbox, etc.)
-└── audio/
-    ├── bgm/      # background music
-    └── se/       # sound effects
-```
-
-**The directory names matter.** The engine scans these directories; subdirectories work too
-(`assets/bg/chapter1/village.png` → sprite name `chapter1_village`).
-
-> Early docs said `assets/char/`. The engine still accepts that name, but only when
-> `character/` does not exist — renaming is recommended.
-
-### Textbox background
-
-If you want your textbox to have a background, drop a semi-transparent PNG at `assets/ui/textbox.png`.
-
-**It runs without one** — you just get transparent textbox area with text floating over the background.
-
-**Easiest way**: generate one with [ImageMagick](https://imagemagick.org/):
+The quickest way to make one with [ImageMagick](https://imagemagick.org/):
 
 ```bash
 magick -size 1200x280 xc:"#0a0a14cc" textbox.png
@@ -167,90 +315,19 @@ magick -size 1200x280 xc:"#0a0a14cc" textbox.png
 
 Put the result in `assets/ui/`.
 
-### Background
+## Hot reload
 
-Find any 16:9 image, name it `bg.png` or whatever, drop it in `assets/bg/`.
+**While the game is running**, edit `script.tsn` or `config.toml`, save, and **the change appears
+immediately**.
 
-**It runs without one** — the screen is just black.
+- Change a line of dialogue → the screen updates instantly
+- Change a color, position, or font size → instantly
+- Add a `@choice` option → you'll see it the next time you reach that point
 
-## 7. Run it
+**A broken script won't crash or black-screen the game**: it draws a page of red text telling you
+**which file and line** is wrong. Long lines wrap instead of running off the screen.
 
-```bash
-cargo run
-```
-
-First build takes a few minutes. After that, a window opens and shows your text.
-
-**Congratulations, you're up and running.**
-
-## 8. Next steps
-
-### Add a background
-
-Drop an image into `assets/bg/`, say `village.png`. Add to your script:
-
-```
-:: start
-@scene village
-@say "You arrive at a village."
-```
-
-**No configuration needed** — the filename becomes the sprite name.
-
-### Add a character sprite
-
-Drop a PNG into `assets/character/`, say `alice.png`. Add:
-
-```
-@show alice at 0.55 0.10 0.40 0.85
-@say alice "Hello."
-```
-
-The four numbers after `at` are **x y w h**, all normalized 0~1. `0.55 0.10 0.40 0.85` means "right side of the screen, starting at 10% from the top, 40% wide, 85% tall".
-
-### Add a branch
-
-```
-@say "You see someone."
-@choice
-    Wave -> greet
-    Walk away -> leave
-
-:: greet
-@say "You walk over."
-@jump end
-
-:: leave
-@say "You turn and leave."
-@jump end
-
-:: end
-@say "The end."
-```
-
-### Add music
-
-Drop a song into `assets/audio/bgm/`, say `main.mp3`. Add:
-
-```
-@play bgm main
-```
-
-**It loops automatically.**
-
-## About hot reload
-
-**While the game is running**, edit `script.tsn` or `config.toml`, save, and **the game updates instantly**.
-
-- Change a line of dialogue → screen updates instantly
-- Change a color, position or font size → updates instantly
-- Add a `@choice` option → visible the next time you reach it
-
-**A broken script won't crash the game — and won't leave you staring at a black screen.**
-The window shows a red error page telling you **which file and which line** is wrong.
-Long lines wrap, so nothing runs off the right edge.
-
-```
+```text
 timesnow —— 剧本有问题，游戏已暂停
 
 chapters/ch2.tsn:9:1
@@ -261,45 +338,47 @@ chapters/ch2.tsn:9:1
 改好之后会自动继续，不用重启。
 ```
 
-Fix the script, save, and the game keeps going — no restart. Errors are printed to the console too,
-if you'd rather watch the terminal.
+**Fix the script and save, and the game carries on by itself** — no restart. You can watch the
+terminal at the same time: errors also go to the console.
 
-**New images and audio need a restart.** Assets are scanned once at startup.
+**Adding images or audio needs a restart.** Assets are scanned once at startup — after dropping new
+files into `assets/`, run `cargo run` again.
 
-**Only Rust code changes require a rebuild.**
+**Only Rust changes require a rebuild.**
 
-## Check your script without running it: `--check`
+## Checking the script without opening a window: `--check`
 
-No window, no GPU:
+When you want to confirm the script is sound without opening a window:
 
 ```bash
 cargo run -- --check
 ```
 
-It does five things:
+It does all of this without a GPU:
 
-- Parses the script (every `@include`d file) and reports errors with **exact file:line:column**
-- Verifies every `@jump` / `@if` / `@choice` target block exists
-- Verifies referenced backgrounds / sprites / BGM / SFX exist under `assets/`
-- Flags variables that are read but never set (those branches can never be taken)
-- Parses `config.toml`, catching bad field types and unclosed brackets with line/column
+- Parses the script (including every `@include`d file), reporting errors **with exact file:line:column**
+- Checks that every `@jump` / `@if` / `@choice` target block exists
+- Checks that referenced backgrounds / sprites / BGM / sound effects exist under `assets/`
+- Checks for variables that are read but never set (those branches can never be taken)
+- Checks that variables used in an `@set` expression have a value by that point
+- Checks that `config.toml` parses (type errors and unclosed brackets are reported with line/column)
 
-Exits with code `1` when there are errors, so it drops straight into CI:
+**Errors exit with code `1`**, so you can put it straight into CI. Warnings don't affect the exit
+code.
 
-```
-$ cargo run -- --check
-error chapters/ch2.tsn:4: 块 'ex' 引用了不存在的块 'edn'
+Output looks like this (the path is absolute; the line number is the **offending line**):
+
+```text
+error C:\my_game\chapters/ch2.tsn:2: 块 'ex' 引用了不存在的块 'edn'
       @jump edn
-warning script.tsn: 引用了不存在的背景 'missing_bg'：assets 里没有同名文件
 
-1 个错误，1 个警告。
+1 个错误，0 个警告。
 ```
 
-A broken config looks like this:
+A broken config:
 
-```
-$ cargo run -- --check
-error examples/phone/config.toml: config.toml 解析失败: TOML parse error at line 13, column 13
+```text
+error C:\my_game\config.toml: config.toml 解析失败: TOML parse error at line 13, column 13
    |
 13 | font_size = "很大"
    |             ^^^^^^^^
@@ -308,36 +387,29 @@ invalid type: string "很大", expected f32
 1 个错误，0 个警告。
 ```
 
-Assets you simply haven't made yet are reported as **warnings**, so they don't block you;
-a missing `config.toml` is only a warning too (the engine falls back to defaults).
+**What's only a warning:** the script referencing an asset that `assets/` doesn't have; and a
+missing `config.toml` entirely (the engine uses defaults and runs fine).
 
+**Asset checks are skipped per directory:** when an asset directory (`assets/bg/`,
+`assets/audio/bgm/`, ...) doesn't exist, that category isn't checked. So **a project with no
+`assets/` at all passes cleanly** rather than drowning you in "missing asset" noise.
 
-## FAQ
+## All the keys
 
-### Compile error: `failed to load manifest`
+| Key | Action |
+|---|---|
+| Left click / `Space` / `Enter` | Advance the dialogue (pressing once mid-typing shows the whole line) |
+| `1`–`4` | Pick the matching choice |
+| `S` / `L` | Open the save / load screen |
+| `F5` / `F9` | Quick save / quick load (slot 1) |
+| `PageUp` / `B` | Open the backlog |
+| `A` | Auto-play (press again to turn off) |
+| `K` / `Ctrl` | Skip (press again to turn off; stops at choices) |
+| `N` | Jump to the next choice |
+| `Esc` / `O` | Open settings (volume) |
+| `Esc` | Close the current screen |
 
-A path in `Cargo.toml` is wrong. Check that the `timesnow = { git = "...", tag = "..." }` line was copied correctly.
-
-### Window opens but it's all black
-
-Normal — no background, no textbox image. The text should appear. If it doesn't, check the `:: start` block in `script.tsn`.
-
-### Chinese characters show as boxes
-
-Your system lacks a CJK font. Install one (like Source Han Sans), or test with English text.
-
-### Sprite not found
-
-The console will print `sprite 不存在: xxx`. Check:
-
-- Filename matches the name used in `@scene` / `@show`
-- File is in the right subdirectory (`bg/`, `character/`, `ui/`)
-- Extension is PNG (others work too, but PNG is the safest)
-- The file is new — assets added while the game runs need a restart
-
-A corrupt image logs `纹理解码失败，已跳过: xxx` and is skipped; everything else still loads.
-
-### Where's the save file?
+## Saving and loading
 
 Press `S` for the **save screen** (9 slots), `L` for the load screen. Arrow keys pick a slot, number
 keys jump straight to one, `Enter` confirms, `Esc` backs out. `F5` / `F9` are the quick save/load
@@ -359,13 +431,13 @@ can't, you're taken back to the start of the current block and the console says 
 a choice and that set of options has changed (text or count), you get a notice — the position is kept
 whenever possible, so you don't have to re-read earlier lines.
 
-### How do I re-read earlier lines?
+## Backlog
 
-Press `PageUp` (or `B`) for the backlog and scroll up; `PageUp`/`PageDown` or the wheel pages through
-it, `Esc` returns. The last 200 lines are kept, and they travel with your saves — loading a slot
-keeps its history.
+Press `PageUp` (or `B`) to open it and scroll up; `PageUp`/`PageDown` or the wheel pages through,
+`Esc` returns. The last 200 lines are kept, and they travel with your saves — loading a slot keeps
+its history.
 
-### Auto-play and skip
+## Auto-play and skip
 
 - `A` — **auto-play**: advances 1.6s after a line finishes typing, with "▶ 自动" in the top-right;
   press `A` again to go back to manual
@@ -378,11 +450,11 @@ Skip advances many lines per frame rather than one, so a hundred-line chapter go
 two. `@wait` and `@fade` don't make you wait in skip mode — but **the fade still happens**, collapsed
 to zero seconds: when an author writes `@fade to 0.0 1.0` they want a transition, not a pause.
 
-### Changing the volume
+## Changing the volume
 
 Press `Esc` or `O`:
 
-```
+```text
 设置   ↑/↓ 选择   ←/→ 调节   Esc 返回
 总音量   80%
 BGM      70%
@@ -393,60 +465,56 @@ BGM      70%
 ```
 
 Changes apply immediately, including to the BGM already playing. Leaving the screen writes back to
-`config.toml`, so your values survive a restart. **The write-back re-serializes the whole file, so
-comments are lost** — a deliberate trade-off.
+`config.toml`, so your values survive a restart.
 
-### How do I label chapters?
+> **The write-back re-serializes the whole file, so comments are lost.** A deliberate trade-off:
+> preserving comments needs extra text-editing logic, and volume is something players change often.
 
-Put a line in your script and the save screen will show the chapter name:
+---
 
-```
-:: ch2_start
-@chapter "第二章 · 湖边"
-```
+# Part 4: Troubleshooting
 
-It only gives saves a readable label; it doesn't change what's on screen.
+## Build error `failed to load manifest`
 
-### How do I end the game / return to the title?
+The path in `Cargo.toml` is wrong. Check that
+`timesnow = { git = "...", branch = "main" }` was copied correctly.
 
-```
-@quit     end the game (closes the window)
-@title    return to the title screen
-```
+## The window opens but it's black
 
-Put `@quit` after an ending. `@title` re-reads the script, clears variables and the backlog, and
-stops the music — so a replayable title screen is just these two lines:
+Normal — no background, no textbox backdrop. The text should still be there.
+If the text is missing too, check the `:: start` block in `script.tsn`.
 
-```
-:: title
-@say "——我的游戏——"
-@choice
-    开始 -> ch1
-    退出 -> bye
+## CJK text renders as boxes
 
-:: bye
-@say "下次再见。"
-@fade to 0.0 1.5
-@quit
-```
+The system is missing a CJK font. Install one (Source Han Sans, for example) or test with English
+dialogue for now.
 
-`@title` **re-reads the file**, so after editing your story you can press it to see the new opening
-without restarting.
+## A sprite can't be found
 
-### All the keys
+The console prints `sprite 不存在: xxx`. Check:
 
-| Key | Action |
-|---|---|
-| Left click / `Space` / `Enter` | Advance the dialogue (pressing once mid-typing shows the whole line) |
-| `1`–`4` | Pick the matching choice |
-| `S` / `L` | Open the save / load screen |
-| `F5` / `F9` | Quick save / quick load (slot 1) |
-| `PageUp` / `B` | Open the backlog |
-| `A` | Auto-play (press again to turn off) |
-| `K` / `Ctrl` | Skip (press again to turn off; stops at choices) |
-| `N` | Jump to the next choice |
-| `Esc` / `O` | Open settings (volume) |
-| `Esc` | Close the current screen |
+- The filename matches the name in `@scene` / `@show`
+- The file is in the right subdirectory (`bg/`, `character/`, `ui/`)
+- The extension is PNG (other formats work, but PNG is safest)
+- The image is newly added — new assets need a game restart to be scanned
+
+A corrupt image (half-downloaded, say) prints `纹理解码失败，已跳过: xxx` and the other assets load
+normally.
+
+## An arithmetic expression in the script didn't take effect
+
+When `@set` can't compute (division by zero, wrong type, a variable with no value) it **won't crash
+or stop the script** — it skips that assignment and prints a notice to the console and the screen.
+Run `cargo run -- --check` first; it catches these ahead of time.
+
+## Still stuck
+
+Open an issue at https://github.com/TimeAngler/timesnow/issues.
+
+**Before you do, two things:**
+
+1. Copy the complete error message (everything after `error:`)
+2. Say which OS and Rust version you're on (`rustc --version`)
 
 ## Next
 
@@ -454,12 +522,3 @@ without restarting.
 - Examples:
     - [`examples/minimal`](../examples/minimal) — smallest runnable
     - [`examples/phone`](../examples/phone) — a full short story
-
-## Having trouble?
-
-Open an issue at https://github.com/TimeAngler/timesnow/issues.
-
-**Before you do, please:**
-
-1. Copy the full error message (everything after `error:`)
-2. Mention your OS and Rust version (`rustc --version`)

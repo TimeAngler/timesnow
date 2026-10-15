@@ -310,6 +310,39 @@ fn a_realistic_affection_flow_works() {
     assert_eq!(say_text(&machine).as_deref(), Some("她笑了。"));
 }
 
+/// 选项携带的赋值只能是字面量——文档里就是这么写的，钉住它。
+/// 想在选项上"加分"得在目标块里用 @set。
+#[test]
+fn choice_assignments_only_take_literals() {
+    // 字面量：可以
+    let src = ":: start
+@choice
+    加班 -> work { 累了 = true }
+
+:: work
+@say \"好累。\"
+";
+    let program = Program::from_source(src).expect("字面量赋值应当合法");
+    let mut machine = Vm::new(program);
+    machine.run_until_blocked();
+    assert!(machine.pending_choice().is_some());
+    machine.select(0).unwrap();
+    assert_eq!(machine.vars().get("累了"), Some(&Value::Bool(true)));
+
+    // 算式：还不支持（这是 --check 会抓到的错）
+    let bad = ":: start
+@choice
+    加班 -> work { 加班次数 = 加班次数 + 1 }
+
+:: work
+@say \"好累。\"
+";
+    assert!(
+        Program::from_source(bad).is_err(),
+        "选项赋值里的算式应当被拦下；如果以后支持了请更新这条测试"
+    );
+}
+
 /// 条件不成立时要走 else，而不是掉进 then
 #[test]
 fn if_goes_to_else_when_the_condition_is_false() {
@@ -330,6 +363,52 @@ fn nested_conditions_evaluate_correctly() {
         Some(Step::Say { text, .. }) => assert_eq!(text, "两个都对"),
         other => panic!("期望 Say，得到 {other:?}"),
     }
+}
+
+/// 条件里的优先级：`or` 低于 `and`，所以 `a or b and c` 是 `a or (b and c)`。
+/// 文档就是这么写的，这条把它钉住。
+///
+/// 注意剧本字符串必须写成真正的多行——Rust 的 `\` 续行会把下一行的
+/// 前导空白吃掉，`@if` 下面的块就没有缩进，解析会报"需要缩进"。
+#[test]
+fn condition_precedence_is_or_then_and() {
+    // a 为真 → 整个条件真（`or` 短路），即使 b and c 是假
+    let src = ":: start
+@set a = true
+@set b = false
+@set c = false
+@if a or b and c
+    @say \"真\"
+@else
+    @say \"假\"
+";
+    let program = Program::from_source(src).expect("应当能解析");
+    let mut machine = Vm::new(program);
+    machine.run_until_blocked();
+    assert_eq!(
+        say_text(&machine).as_deref(),
+        Some("真"),
+        "a or b and c 应当是 a or (b and c)"
+    );
+
+    // 括号能改写优先级：这个应当是假
+    let src = ":: start
+@set a = true
+@set b = false
+@set c = false
+@if (a or b) and c
+    @say \"真\"
+@else
+    @say \"假\"
+";
+    let program = Program::from_source(src).expect("括号应当被支持");
+    let mut machine = Vm::new(program);
+    machine.run_until_blocked();
+    assert_eq!(
+        say_text(&machine).as_deref(),
+        Some("假"),
+        "(a or b) and c 应当是假"
+    );
 }
 
 /// 一条长跳转链必须能走到头（顺便验 MAX_HOPS 不会误伤）
