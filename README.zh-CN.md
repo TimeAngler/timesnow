@@ -99,7 +99,7 @@ cargo run -p phone
 @quit
 ```
 
-完整语法见 [`docs/dsl.md`](docs/dsl.md)。
+完整语法见 [`docs/dsl.md`](docs/dsl.md)（[English](docs/dsl.en.md)）。
 
 ## 按键
 
@@ -162,7 +162,7 @@ crates/
 ## 文档
 
 - [快速开始](docs/getting-started.md) · [Getting started](docs/getting-started.en.md)
-- [DSL 语法参考](docs/dsl.md)
+- [DSL 语法参考](docs/dsl.md) · [DSL reference](docs/dsl.en.md)
 
 ## License
 

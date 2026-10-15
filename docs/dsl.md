@@ -410,3 +410,7 @@ timesnow 使用自研的剧本 DSL，文件扩展名为 `.tsn`。
 | 停止音乐 | `@stop bgm` |
 | 注释 | `# 内容` |
 | 引入文件 | `@include 路径` |
+
+---
+
+[English](dsl.en.md) · [快速开始](getting-started.md)

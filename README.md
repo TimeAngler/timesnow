@@ -101,7 +101,7 @@ cargo run -p phone
 @quit
 ```
 
-See [`docs/dsl.md`](docs/dsl.md) for the full grammar.
+See [`docs/dsl.en.md`](docs/dsl.en.md) for the full grammar.
 
 ## Controls
 
@@ -164,7 +164,7 @@ endings — but it's still exploratory. Issues and PRs welcome.
 ## Documentation
 
 - [Getting started](docs/getting-started.en.md) · [快速开始](docs/getting-started.md)
-- [DSL reference](docs/dsl.md)
+- [DSL reference](docs/dsl.en.md) · [DSL 语法参考](docs/dsl.md)
 
 ## License
 

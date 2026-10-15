@@ -180,7 +180,7 @@ The four numbers after `at` are **x y w h**, all normalized 0–1. `0.55 0.10 0.
 ```
 
 The right-hand side of `@set` can be an arithmetic expression (`+ - * / %`, parentheses) and can
-reference other variables. See [`dsl.md`](dsl.md) for the full rules.
+reference other variables. See [`dsl.en.md`](dsl.en.md) for the full rules.
 
 ## Add music
 
@@ -518,7 +518,7 @@ Open an issue at https://github.com/TimeAngler/timesnow/issues.
 
 ## Next
 
-- Full grammar reference: [`dsl.md`](dsl.md)
+- Full grammar reference: [`dsl.en.md`](dsl.en.md) · [中文](dsl.md)
 - Examples:
     - [`examples/minimal`](../examples/minimal) — smallest runnable
     - [`examples/phone`](../examples/phone) — a full short story

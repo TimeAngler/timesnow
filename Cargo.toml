@@ -8,7 +8,6 @@ version = "0.1.0"
 license = "MIT"
 
 [workspace.dependencies]
-rhai = "1"
 serde = { version = "1", features = ["derive"]}
 ron = "0.12"
 

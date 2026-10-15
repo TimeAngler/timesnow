@@ -178,7 +178,7 @@ cargo run
 ```
 
 `@set` 右边能写算式（`+ - * / %`、括号），也能引用别的变量。
-完整规则见 [`dsl.md`](dsl.md)。
+完整规则见 [`dsl.md`](dsl.md)（[English](dsl.en.md)）。
 
 ## 加音乐
 
@@ -499,7 +499,7 @@ BGM      70%
 
 ## 下一步
 
-- 语法完整参考：[`dsl.md`](dsl.md)
+- 语法完整参考：[`dsl.md`](dsl.md) · [English](dsl.en.md)
 - 示例项目：
     - [`examples/minimal`](../examples/minimal) —— 最小可运行
     - [`examples/phone`](../examples/phone) —— 完整短篇
