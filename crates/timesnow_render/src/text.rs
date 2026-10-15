@@ -130,16 +130,33 @@ impl TextRenderer {
         color: (u8, u8, u8),
         max_width: f32,
     ) {
+        self.add_debug_wrapped_sized(text, x, y, scale, 1.0, color, max_width);
+    }
+
+    /// 同上，但可以缩字号（回看历史 / 存读档界面用）。
+    /// UI 不能沿用正文那套字号：正文 40 多像素，配上 UI 的行距会让每一行叠在一起。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_debug_wrapped_sized(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        size_scale: f32,
+        color: (u8, u8, u8),
+        max_width: f32,
+    ) {
         const OFFSET: f32 = 0.0015;
-        self.add_boxed(
+        self.add_sized(
             text,
             x + OFFSET,
             y + OFFSET,
             scale,
+            size_scale,
             OUTLINE_COLOR,
             Some(max_width),
         );
-        self.add_boxed(text, x, y, scale, color, Some(max_width));
+        self.add_sized(text, x, y, scale, size_scale, color, Some(max_width));
     }
 
     fn add_boxed(
@@ -151,8 +168,27 @@ impl TextRenderer {
         color: (u8, u8, u8),
         max_width: Option<f32>,
     ) {
-        let font_size = self.font_size;
-        let line_height = self.line_height;
+        self.add_sized(text, x, y, scale, 1.0, color, max_width);
+    }
+
+    /// 字号可缩放的版本。UI 界面（回看历史、存读档）不能沿用正文那套字号——
+    /// 正文 40 多像素，配上给 UI 的行距就会让每一行叠在一起。
+    ///
+    /// `size_scale` 同时缩字号和行高，保持行距和字号的相对关系。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_sized(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        size_scale: f32,
+        color: (u8, u8, u8),
+        max_width: Option<f32>,
+    ) {
+        let size_scale = size_scale.max(0.1);
+        let font_size = (self.font_size * size_scale).max(6.0);
+        let line_height = (self.line_height * size_scale).max(font_size * 1.1);
         let frame = self.frame;
 
         // 先把旧 entries 拿出来：这样既能复用 buffer，又能同时借用 font_system

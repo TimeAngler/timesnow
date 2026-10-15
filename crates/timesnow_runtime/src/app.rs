@@ -17,17 +17,43 @@ use winit::window::{Window, WindowAttributes, WindowId};
 /// 错误页最多铺多少行，超出的截断（具体数目在渲染时按窗口高度再收紧）
 const ERROR_PAGE_MAX_LINES: usize = 40;
 
-/// 错误页每行的高度（像素）。配合自动换行用。
-const ERROR_LINE_HEIGHT_PX: f32 = 18.0;
+/// 覆盖层界面（错误页 / 回看历史 / 存读档）的字号与行距，全部按窗口高度算。
+///
+/// 这些界面**不能**沿用正文那套字号：正文字号是配置里的 `font_size`（示例里 42px），
+/// 而 UI 的行距只有 20 多像素——照抄就会让每一行叠在一起。
+#[derive(Debug, Clone, Copy)]
+struct UiMetrics {
+    /// 相对正文字号的缩放。渲染器按 `正文 × size_scale` 得到实际字号。
+    size_scale: f32,
+    /// 行高（归一化）
+    line_h: f32,
+    /// 左边距（归一化）
+    margin_x: f32,
+    /// 首行位置（归一化）
+    top: f32,
+}
+
+/// UI 的字号按窗口高度定：720p 约 22px，1080p 约 33px。
+/// `size_scale` 是相对**配置里正文字号**的倍数，所以窗口越大整体越协调。
+fn ui_metrics(height: u32, body_font_px: f32) -> UiMetrics {
+    let ui_font_px = ui_font_px(height);
+    let line_h_px = ui_font_px * 1.6;
+    let line_h = line_h_px / height.max(1) as f32;
+    UiMetrics {
+        size_scale: (ui_font_px / body_font_px.max(1.0)).clamp(0.25, 1.2),
+        line_h,
+        margin_x: 0.04,
+        top: 0.03,
+    }
+}
+
+/// 覆盖层界面的目标字号（像素）
+fn ui_font_px(height: u32) -> f32 {
+    (height as f32 * 0.030).clamp(12.0, 34.0)
+}
 
 /// 错误页下多久查一次"文件改好了没"。太密会白烧 CPU，太疏显得卡。
 const ERROR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// backlog 界面上每行的高度（像素）
-const BACKLOG_LINE_HEIGHT_PX: f32 = 24.0;
-
-/// 存档界面每行的高度（像素）
-const SLOT_LINE_HEIGHT_PX: f32 = 30.0;
 
 /// 屏幕提示显示多久
 const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
@@ -138,7 +164,12 @@ impl App {
             (None, Some(e))
         } else {
             match Script::load(&script_path, &config) {
-                Ok(s) => (Some(s), None),
+                Ok(mut s) => {
+                    // 游戏刚启动：第一句直接整句显示。
+                    // 打字机留给读档——那时"字在出来"是读到了的反馈。
+                    s.skip_typewriter();
+                    (Some(s), None)
+                }
                 Err(e) => {
                     eprintln!("剧本加载失败:\n{e}");
                     (None, Some(e.to_string()))
@@ -278,21 +309,26 @@ impl App {
         r.clear_background();
         r.set_alpha(1.0);
 
-        let line_h = ERROR_LINE_HEIGHT_PX / height.max(1) as f32;
-        let max_lines = ((0.92 / line_h).floor() as usize).min(ERROR_PAGE_MAX_LINES);
+        // UI 的字号和行距都按窗口高度算，屏幕大小不同也不会叠在一起
+        let ui = ui_metrics(height, self.config.text.font_size);
 
-        // 左右各留 3% 边距，剩下的宽度给文字盒（单位：像素，交给换行用）
-        let text_width_px = (width as f32 * 0.94).max(1.0);
+        // 文字盒宽度必须从"文字起点"算到屏幕右边缘，否则盒子会超出屏幕、
+        // 文字就跑到可视区外面去了（以前就是这么错的）。
+        let left = ui.margin_x;
+        let text_width_px = ((width as f32) * (1.0 - left) - width as f32 * 0.02).max(1.0);
+
+        let max_lines = ((1.0 - ui.top) / ui.line_h).floor() as usize;
+        let max_lines = max_lines.min(ERROR_PAGE_MAX_LINES);
 
         for (i, line) in lines.iter().take(max_lines).enumerate() {
-            let y = 0.04 + i as f32 * line_h;
+            let y = ui.top + i as f32 * ui.line_h;
             // 第一行（标题）用暖白，其余用浅红，方便一眼看到出错了
             let color = if i == 0 {
                 (255, 200, 200)
             } else {
                 (255, 150, 150)
             };
-            r.add_debug_text_wrapped(line, 0.03, y, 1.0, color, text_width_px);
+            r.add_ui_text_wrapped(line, left, y, ui.size_scale, color, text_width_px);
         }
 
         r.render();
@@ -320,9 +356,13 @@ impl App {
         // 半透明底：铺一张白纹理再乘上暗色
         r.add_ui_tinted("white", Rect::fullscreen(), (0.05, 0.05, 0.08));
 
-        let line_h = BACKLOG_LINE_HEIGHT_PX / height.max(1) as f32;
-        let rows = ((0.80 / line_h).floor() as usize).max(1);
-        let text_width_px = (width as f32 * 0.90).max(1.0);
+        let ui = ui_metrics(height, self.config.text.font_size);
+        let left = ui.margin_x;
+        let text_width_px = ((width as f32) * (1.0 - left) - width as f32 * 0.02).max(1.0);
+
+        // 标题占一行，下面全部给历史
+        let body_top = ui.top + ui.line_h * 1.8;
+        let rows = (((1.0 - body_top - 0.03) / ui.line_h).floor() as usize).max(1);
 
         // scroll 是从最新往上数的偏移：0 = 贴着底部
         let total = entries.len();
@@ -330,7 +370,7 @@ impl App {
         let start = end.saturating_sub(rows);
 
         let title = if total == 0 {
-            "回看历史（还没有内容）".to_string()
+            "回看历史（还没有内容）　Esc 返回".to_string()
         } else {
             format!(
                 "回看历史  {}/{}   PgUp/PgDn 翻页   Esc 返回",
@@ -338,11 +378,18 @@ impl App {
                 total
             )
         };
-        r.add_debug_text(&title, 0.04, 0.03, 1.0, (255, 230, 200));
+        r.add_ui_text(&title, left, ui.top, ui.size_scale, (255, 230, 200));
 
-        let mut y = 0.10;
+        let mut y = body_top;
         if start >= end {
-            r.add_debug_text("（这一页没有内容）", 0.06, y, 1.0, (170, 170, 170));
+            r.add_ui_text_wrapped(
+                "（这一页没有内容）",
+                left,
+                y,
+                ui.size_scale,
+                (170, 170, 170),
+                text_width_px,
+            );
         } else {
             for (speaker, text) in &entries[start..end] {
                 let line = match speaker {
@@ -354,8 +401,8 @@ impl App {
                 } else {
                     (200, 200, 200)
                 };
-                r.add_debug_text_wrapped(&line, 0.05, y, 1.0, color, text_width_px);
-                y += line_h;
+                r.add_ui_text_wrapped(&line, left, y, ui.size_scale, color, text_width_px);
+                y += ui.line_h;
             }
         }
 
@@ -364,6 +411,7 @@ impl App {
 
     /// 存/读档界面：9 个槽位，当前光标高亮。
     fn draw_slots(&mut self, height: u32, mode: SlotMode, cursor: usize) {
+        let ui = ui_metrics(height, self.config.text.font_size);
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
@@ -374,15 +422,16 @@ impl App {
         r.set_alpha(1.0);
         r.add_ui_tinted("white", Rect::fullscreen(), (0.05, 0.05, 0.08));
 
-        let line_h = SLOT_LINE_HEIGHT_PX / height.max(1) as f32;
+        let left = ui.margin_x;
+        let line_h = ui.line_h;
 
         let title = match mode {
             SlotMode::Save => "存档   ↑/↓ 选择   Enter 保存   Esc 返回",
             SlotMode::Load => "读档   ↑/↓ 选择   Enter 读取   Esc 返回",
         };
-        r.add_debug_text(title, 0.06, 0.05, 1.0, (255, 230, 200));
+        r.add_ui_text(title, left, ui.top, ui.size_scale, (255, 230, 200));
 
-        let mut y = 0.14;
+        let body_top = ui.top + line_h * 1.8;
         for i in 1..=SLOT_COUNT {
             let info = self.slots.iter().find(|s| s.index == i);
             let body = match info {
@@ -398,18 +447,17 @@ impl App {
             } else {
                 (130, 130, 130)
             };
-            r.add_debug_text(&line, 0.07, y, 1.0, color);
-            y += line_h;
-        }
+            let y = body_top + (i - 1) as f32 * line_h;
 
-        // 存档模式下的光标高亮框
-        if mode == SlotMode::Save || mode == SlotMode::Load {
-            let box_y = 0.14 + (cursor.saturating_sub(1)) as f32 * line_h - line_h * 0.15;
-            r.add_ui_tinted(
-                "white",
-                Rect::new(0.06, box_y, 0.88, line_h * 0.95),
-                (0.18, 0.18, 0.28),
-            );
+            // 光标所在那行先画个高亮块，再写字
+            if i == cursor {
+                r.add_ui_tinted(
+                    "white",
+                    Rect::new(left - 0.01, y - line_h * 0.12, 0.90, line_h * 0.95),
+                    (0.20, 0.20, 0.32),
+                );
+            }
+            r.add_ui_text(&line, left + 0.01, y, ui.size_scale, color);
         }
 
         r.render();
@@ -468,19 +516,22 @@ impl App {
                 PendingAction::ReadSlot(index) => {
                     match saves::read_slot(&self.project_dir, index) {
                         Ok(data) => {
+                            let mut message = format!("已读取槽位 {index}");
+                            let mut resumed_bgm = None;
                             if let Some(script) = self.script.as_mut() {
                                 if let Some(notice) = script.apply_save(data) {
                                     eprintln!("读档提示: {notice}");
-                                    self.toast = Some((notice.to_string(), Instant::now()));
-                                } else {
-                                    self.toast =
-                                        Some((format!("已读取槽位 {index}"), Instant::now()));
+                                    message = notice.to_string();
                                 }
-                                if let Some(bgm) = script.take_resumable_bgm()
-                                    && let Err(e) = self.audio.play_bgm(&bgm)
-                                {
-                                    eprintln!("恢复 BGM 失败: {e}");
-                                }
+                                // 读档后那句走打字机（看得出确实读到了），
+                                // 顺便把存档里那首 BGM 恢复出来
+                                resumed_bgm = script.take_resumable_bgm();
+                            }
+                            self.toast = Some((message, Instant::now()));
+                            if let Some(bgm) = resumed_bgm
+                                && let Err(e) = self.audio.play_bgm(&bgm)
+                            {
+                                eprintln!("恢复 BGM 失败: {e}");
                             }
                             self.screen = Screen::Playing;
                         }
@@ -1086,23 +1137,66 @@ mod tests {
         ));
     }
 
-    /// 错误页的长行必须交给换行处理，不能伸出屏幕。
-    /// 这里钉住"文字盒宽度 = 窗口宽度的 94%"这条约定，以及行高换算。
+    /// 覆盖层界面的排版：字号随窗口缩、行距必须容得下字号、文字盒不能超出屏幕。
+    ///
+    /// 这条是回归测试：以前 UI 直接沿用正文字号（42px）配 24px 行距，
+    /// 结果回看历史每一行都叠在一起。
     #[test]
-    fn error_page_layout_wraps_within_the_window() {
-        // 与 draw_error_page 里的算法保持一致
-        let text_width_px = |w: u32| (w as f32 * 0.94).max(1.0);
-        assert!((text_width_px(1920) - 1804.8).abs() < 0.1);
-        assert!(text_width_px(1920) < 1920.0, "必须留出边距");
-        assert!(text_width_px(0) >= 1.0, "宽度为 0 时不能算出 0 或负数");
+    fn ui_metrics_scale_with_the_window_and_leave_room() {
+        for height in [480u32, 720, 1080, 1440] {
+            let body = 42.0; // 示例工程的正文字号
+            let ui = ui_metrics(height, body);
 
-        // 行高换算：720p 下大约能铺 36 行，且不超过硬上限
-        let line_h = ERROR_LINE_HEIGHT_PX / 720.0_f32;
-        let max_lines = ((0.92 / line_h).floor() as usize).min(ERROR_PAGE_MAX_LINES);
-        assert!(
-            max_lines > 20 && max_lines <= ERROR_PAGE_MAX_LINES,
-            "实际 {max_lines}"
-        );
+            // 行距换算回像素后，必须比 UI 字号本身高（否则两行叠在一起）
+            let line_px = ui.line_h * height as f32;
+            let font_px = ui_font_px(height);
+            assert!(
+                line_px > font_px,
+                "{height}p: 行距 {line_px:.1}px 必须大于字号 {font_px:.1}px"
+            );
+            // 也不能松得离谱
+            assert!(
+                line_px < font_px * 3.0,
+                "{height}p: 行距 {line_px:.1}px 太松"
+            );
+
+            // 首行 + 若干行还在屏幕内
+            assert!(ui.top < 0.1);
+            assert!(ui.margin_x < 0.1);
+            // 一屏至少能放下 10 行历史
+            let rows = (((1.0 - ui.top) / ui.line_h).floor()) as usize;
+            assert!(rows >= 10, "{height}p 一屏只能放 {rows} 行");
+        }
+    }
+
+    /// 文字盒宽度必须从文字起点算到屏幕右边，不能超出屏幕
+    #[test]
+    fn overlay_text_box_stays_inside_the_window() {
+        let box_width = |w: u32| {
+            let ui = ui_metrics(720, 42.0);
+            ((w as f32) * (1.0 - ui.margin_x) - w as f32 * 0.02).max(1.0)
+        };
+        for w in [800u32, 1280, 1920, 2560] {
+            let bw = box_width(w);
+            let left_px = ui_metrics(720, 42.0).margin_x * w as f32;
+            assert!(
+                left_px + bw <= w as f32,
+                "{w}px 窗口：左边距 {left_px:.0} + 文字盒 {bw:.0} 超宽了"
+            );
+            assert!(bw > w as f32 * 0.8, "{w}px 窗口：文字盒太窄，浪费屏幕");
+        }
+    }
+
+    /// 回看历史的不换行也是一条回归：长台词必须能折行，否则会伸出屏幕
+    #[test]
+    fn overlay_text_width_is_positive_even_for_tiny_windows() {
+        for w in [0u32, 1, 320] {
+            let ui = ui_metrics(1, 42.0);
+            let bw = ((w as f32) * (1.0 - ui.margin_x) - w as f32 * 0.02).max(1.0);
+            assert!(bw >= 1.0, "{w}px 窗口算出的文字盒宽度必须为正");
+            assert!(ui.line_h > 0.0);
+            assert!(ui.size_scale > 0.0);
+        }
     }
 
     /// 覆盖层界面必须暂停剧本，否则回看历史/开菜单时剧情会自己往前走

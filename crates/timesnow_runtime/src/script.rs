@@ -1041,13 +1041,24 @@ impl Script {
             });
         }
 
-        // 停在 Say 上时整句显示，读档后不会是空对话框
+        // 停在 Say 上时从头打字机显示——读档也该看得见"字在出来"，
+        // 整句一下蹦出来会让人以为没读到。/ 不想等就按一下鼠标或键。
+        self.presentation.visible_chars = 0;
+        self.presentation.text_timer = 0.0;
+
+        notice
+    }
+
+    /// 当前这句直接整句显示，不走打字机。
+    ///
+    /// 用在游戏刚启动的时候（标题画面那句一出来就一闪一闪地打，
+    /// 反而像卡住了）；读档不走这条路。
+    pub fn skip_typewriter(&mut self) {
         self.presentation.visible_chars = self
             .current_full_text()
             .map(|t| t.chars().count())
             .unwrap_or(0);
-
-        notice
+        self.presentation.text_timer = 0.0;
     }
 
     /// 核对读档后的选项界面和存档时是不是同一组。

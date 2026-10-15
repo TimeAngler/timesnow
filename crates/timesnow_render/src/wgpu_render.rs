@@ -243,6 +243,35 @@ impl WgpuRenderer {
             .add_debug_wrapped(text, x, y, scale, color, max_width);
     }
 
+    /// UI 界面用的调试文字：可缩字号 + 换行。
+    /// 回看历史和存读档界面必须缩小字号，否则会和 UI 的行距打架。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_ui_text_wrapped(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        size_scale: f32,
+        color: (u8, u8, u8),
+        max_width: f32,
+    ) {
+        self.text
+            .add_debug_wrapped_sized(text, x, y, 1.0, size_scale, color, max_width);
+    }
+
+    /// UI 文字（不换行）
+    pub fn add_ui_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        size_scale: f32,
+        color: (u8, u8, u8),
+    ) {
+        self.text
+            .add_sized(text, x, y, 1.0, size_scale, color, None);
+    }
+
     pub fn load_sprite(&mut self, name: &str, bytes: &[u8]) {
         self.sprite.load(&self.device, &self.queue, name, bytes);
     }
