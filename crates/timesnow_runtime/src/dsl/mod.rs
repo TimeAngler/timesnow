@@ -59,7 +59,37 @@ impl Sources {
 /// 而不是"展开后那一大段文本的第 N 行"。
 pub fn parse_with_includes(main_path: &Path) -> Result<(ScriptFile, Vec<PathBuf>), DslError> {
     let sources = expand_includes(main_path)?;
+    let file = parse_sources(&sources)?;
 
+    let mut included: Vec<PathBuf> = sources.segments.iter().map(|s| s.file.clone()).collect();
+    included.dedup();
+
+    Ok((file, included))
+}
+
+/// 把一段剧本源码当成"没有 include 的单文件"。
+///
+/// 给测试和工具用：不想碰磁盘就能拿到 `Sources`。
+pub fn expand_source(source: &str) -> Result<Sources, DslError> {
+    use std::path::PathBuf;
+    let file = PathBuf::from("<source>");
+    let mut sources = Sources {
+        text: source.to_string(),
+        segments: Vec::new(),
+        next_line: source.lines().count() + 1,
+    };
+    for (idx, _) in source.lines().enumerate() {
+        sources.segments.push(Segment {
+            file: file.clone(),
+            start_line: idx + 1,
+            line_in_file: idx + 1,
+        });
+    }
+    Ok(sources)
+}
+
+/// 解析已经展开好的源码，并校验跳转目标
+pub fn parse_sources(sources: &Sources) -> Result<ScriptFile, DslError> {
     let file = parser::parse(&sources.text).map_err(|e| {
         let (file, line) = sources.locate(e.line);
         DslError {
@@ -73,12 +103,14 @@ pub fn parse_with_includes(main_path: &Path) -> Result<(ScriptFile, Vec<PathBuf>
         }
     })?;
 
-    check_jump_targets(&file, &sources)?;
+    check_jump_targets(&file, sources)?;
+    Ok(file)
+}
 
-    let mut included: Vec<PathBuf> = sources.segments.iter().map(|s| s.file.clone()).collect();
-    included.dedup();
-
-    Ok((file, included))
+/// 从字符串解析剧本（等价于单文件 `parse_with_includes`）
+pub fn parse_source(source: &str) -> Result<ScriptFile, DslError> {
+    let sources = expand_source(source)?;
+    parse_sources(&sources)
 }
 
 /// 校验：所有 `@jump` / `@if` / `@choice` 的目标块都存在

@@ -156,6 +156,15 @@ impl Program {
         Ok((Self::from_file(file), included))
     }
 
+    /// 直接从一段剧本源码构造。
+    ///
+    /// 这是"不碰磁盘、不碰窗口"的入口：测试、校验工具、把剧本当字符串嵌入，
+    /// 都走这里。`Vm` 的单元测试就是靠它才能在没有任何 IO 的情况下搭起来。
+    pub fn from_source(source: &str) -> Result<Self, DslError> {
+        let file = crate::dsl::parse_source(source)?;
+        Ok(Self::from_file(file))
+    }
+
     pub fn from_file(file: ScriptFile) -> Self {
         let fingerprint = Fingerprint::of(&file);
         let mut block_names: Vec<String> = file.blocks.keys().cloned().collect();

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -6,13 +6,15 @@ use std::time::SystemTime;
 /// - 缺字段 → 用默认值，不报错
 /// - 整个 `config.toml` 缺失 → 全默认 + 一条提示，不再 panic
 /// - 多写的未知字段 → 忽略
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub window: WindowConfig,
     pub textbox: TextboxConfig,
     pub text: TextConfig,
     pub choice: ChoiceConfig,
+    /// 音量。设置界面改的就是这里，改动会写回 config.toml。
+    pub audio: AudioConfig,
 
     #[serde(skip)]
     path: PathBuf,
@@ -20,7 +22,69 @@ pub struct Config {
     last_modified: Option<SystemTime>,
 }
 
-#[derive(Deserialize)]
+/// 音量设置。线性 0.0~1.0（界面上显示成百分比）。
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub master: f32,
+    pub bgm: f32,
+    pub se: f32,
+    pub muted: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            master: 0.8,
+            bgm: 0.7,
+            se: 0.9,
+            muted: false,
+        }
+    }
+}
+
+impl AudioConfig {
+    fn clamp01(v: f32) -> f32 {
+        if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
+    }
+
+    /// 设置界面上能调的那几项，按显示顺序。
+    /// 返回 `(标题, 当前值)`——静音那行用 0/1 表示开关。
+    pub fn rows(&self) -> [(&'static str, f32); AUDIO_ROWS] {
+        [
+            ("总音量", self.master),
+            ("BGM", self.bgm),
+            ("音效", self.se),
+            ("静音", if self.muted { 1.0 } else { 0.0 }),
+        ]
+    }
+
+    /// 按行号调整（`delta` 为 ±0.05 这类步长，最后一行是开关，忽略步长）
+    pub fn adjust(&mut self, row: usize, delta: f32) {
+        match row {
+            0 => self.master = Self::clamp01(self.master + delta),
+            1 => self.bgm = Self::clamp01(self.bgm + delta),
+            2 => self.se = Self::clamp01(self.se + delta),
+            3 => self.muted = !self.muted,
+            _ => {}
+        }
+    }
+
+    /// 把 NaN / 越界值收拾干净——config.toml 是手写的，可能乱来
+    pub fn sanitize(&mut self) {
+        self.master = Self::clamp01(self.master);
+        self.bgm = Self::clamp01(self.bgm);
+        self.se = Self::clamp01(self.se);
+    }
+}
+
+/// 设置界面上的行数（供界面和测试共用）
+pub const AUDIO_ROWS: usize = 4;
+
+/// 设置界面每次按键调整的步长
+pub const AUDIO_STEP: f32 = 0.05;
+
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct WindowConfig {
     pub title: String,
@@ -28,7 +92,7 @@ pub struct WindowConfig {
     pub height: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct TextboxConfig {
     pub x: f32,
@@ -37,7 +101,7 @@ pub struct TextboxConfig {
     pub h: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct TextConfig {
     pub font_size: f32,
@@ -55,7 +119,7 @@ pub struct TextConfig {
     pub name_color: [u8; 3],
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct ChoiceConfig {
     pub x: f32,
@@ -80,6 +144,7 @@ impl Default for Config {
             textbox: TextboxConfig::default(),
             text: TextConfig::default(),
             choice: ChoiceConfig::default(),
+            audio: AudioConfig::default(),
             path: PathBuf::new(),
             last_modified: None,
         }
@@ -159,8 +224,28 @@ impl Config {
 
         config.path = path.to_path_buf();
         config.last_modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        config.audio.sanitize();
 
         Ok(config)
+    }
+
+    /// 把当前配置写回 `config.toml`（设置界面改完音量用）。
+    ///
+    /// 会重新序列化整份配置，所以**手写的注释会丢**。这是刻意的取舍：
+    /// 让引擎去改文本文件、还保住注释，需要额外的文本编辑逻辑，
+    /// 而音量是玩家会反复改的东西——能持久化比保住注释重要。
+    /// 写完之后 `last_modified` 会更新，热重载不会把它当成外部改动。
+    pub fn save(&mut self) -> Result<(), String> {
+        if self.path.as_os_str().is_empty() {
+            return Err("配置没有关联文件路径".into());
+        }
+        let text = toml::to_string_pretty(self).map_err(|e| format!("序列化配置失败: {e}"))?;
+        std::fs::write(&self.path, text)
+            .map_err(|e| format!("写 {} 失败: {e}", self.path.display()))?;
+        self.last_modified = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+        Ok(())
     }
 
     /// 每帧调用，文件变了就重新加载。返回 true 表示变了。
@@ -284,5 +369,127 @@ color = [220, 220, 220]
         assert_eq!(config.window.title, "My Game");
         assert_eq!(config.choice.color, [220, 220, 220]);
         assert_eq!(config.choice.y_center, 0.6);
+    }
+
+    // ---------- 音量 ----------
+
+    /// 老配置文件没有 [audio] 段：要用默认音量，不能报错
+    #[test]
+    fn missing_audio_section_falls_back_to_defaults() {
+        let config: Config = toml::from_str("[window]\ntitle = \"x\"\n").unwrap();
+        assert_eq!(config.audio, AudioConfig::default());
+        assert!(!config.audio.muted);
+    }
+
+    #[test]
+    fn audio_section_is_read() {
+        let config: Config =
+            toml::from_str("[audio]\nmaster = 0.25\nbgm = 0.0\nse = 1.0\nmuted = true\n").unwrap();
+        assert!((config.audio.master - 0.25).abs() < 1e-6);
+        assert_eq!(config.audio.bgm, 0.0);
+        assert_eq!(config.audio.se, 1.0);
+        assert!(config.audio.muted);
+    }
+
+    /// 手写的配置文件可能给出离谱的值，读进来要收拾干净
+    #[test]
+    fn audio_values_are_sanitized_on_load() {
+        let dir = std::env::temp_dir().join(format!("tsn_cfg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[audio]\nmaster = 5.0\nbgm = -3.0\nse = 0.5\n").unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.audio.master, 1.0, "越界要夹住");
+        assert_eq!(config.audio.bgm, 0.0);
+        assert_eq!(config.audio.se, 0.5);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn audio_rows_cover_every_adjustable_setting() {
+        let a = AudioConfig::default();
+        let rows = a.rows();
+        assert_eq!(rows.len(), AUDIO_ROWS);
+        // 每一行的 adjust 都要有效果（静音那行是开关）
+        for i in 0..AUDIO_ROWS {
+            let mut b = a;
+            b.adjust(i, AUDIO_STEP);
+            assert_ne!(b, a, "第 {i} 行调整之后应当变化");
+        }
+    }
+
+    #[test]
+    fn audio_adjust_clamps_at_the_ends() {
+        let mut a = AudioConfig {
+            master: 1.0,
+            bgm: 0.0,
+            se: 0.5,
+            muted: false,
+        };
+        a.adjust(0, AUDIO_STEP);
+        assert_eq!(a.master, 1.0, "已经满了不该超过 1.0");
+        a.adjust(1, -AUDIO_STEP);
+        assert_eq!(a.bgm, 0.0, "已经空了不该低于 0.0");
+        // 静音那行是开关，加减都一样（切换）
+        a.adjust(3, AUDIO_STEP);
+        assert!(a.muted);
+        a.adjust(3, -AUDIO_STEP);
+        assert!(!a.muted);
+    }
+
+    #[test]
+    fn audio_adjust_ignores_out_of_range_rows() {
+        let mut a = AudioConfig::default();
+        let before = a;
+        a.adjust(99, AUDIO_STEP);
+        assert_eq!(a, before, "越界的行号不该改动任何东西");
+    }
+
+    /// 写回磁盘：存了再读，音量要一模一样（设置界面靠这个持久化）
+    #[test]
+    fn save_then_load_round_trips_the_audio_settings() {
+        let dir = std::env::temp_dir().join(format!("tsn_cfg_save_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[window]\ntitle = \"存读测试\"\n").unwrap();
+
+        let mut config = Config::load(&path).unwrap();
+        config.audio.master = 0.3;
+        config.audio.bgm = 0.15;
+        config.audio.muted = true;
+        config.save().expect("写回应当成功");
+
+        let back = Config::load(&path).unwrap();
+        assert_eq!(back.audio.master, 0.3);
+        assert_eq!(back.audio.bgm, 0.15);
+        assert!(back.audio.muted);
+        // 其它字段不能被写丢
+        assert_eq!(back.window.title, "存读测试");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 写回之后热重载不该把自己写的文件当成"外部改动"
+    #[test]
+    fn saving_does_not_trigger_a_spurious_reload() {
+        let dir = std::env::temp_dir().join(format!("tsn_cfg_reload_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[audio]\nmaster = 0.5\n").unwrap();
+
+        let mut config = Config::load(&path).unwrap();
+        config.audio.master = 0.6;
+        config.save().unwrap();
+
+        // 自己刚写完，紧接着检查重载：不该认为文件变了
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            !config.check_reload(),
+            "刚保存完就报重载，说明 last_modified 没更新"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

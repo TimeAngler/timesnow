@@ -366,10 +366,7 @@ impl SpriteRenderer {
     /// （`draw` 期间的借用无法可变）。
     pub fn upload(&self, queue: &wgpu::Queue) {
         for (i, inst) in self.instances.iter().enumerate() {
-            let transform = TransformUniform {
-                rect: [inst.rect.x, inst.rect.y, inst.rect.width, inst.rect.height],
-                params: [self.global_alpha, inst.tint[0], inst.tint[1], inst.tint[2]],
-            };
+            let transform = instance_transform(inst, self.global_alpha);
             let offset = i as u64 * INSTANCE_ALIGN;
             queue.write_buffer(
                 &self.transform_buffer,
@@ -414,5 +411,90 @@ impl SpriteRenderer {
 
     pub fn reset_tint(&mut self) {
         self.next_tint = [1.0, 1.0, 1.0];
+    }
+}
+
+/// 一个实例 → 上传给 GPU 的 uniform。
+///
+/// 抽成自由函数是为了能单测：以前这段逻辑埋在 `upload` 里，
+/// 需要真的拿到一个 wgpu device 才能验，所以从来没被验过。
+fn instance_transform(inst: &Instance, global_alpha: f32) -> TransformUniform {
+    TransformUniform {
+        rect: [inst.rect.x, inst.rect.y, inst.rect.width, inst.rect.height],
+        params: [global_alpha, inst.tint[0], inst.tint[1], inst.tint[2]],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inst(name: &str, rect: Rect, tint: [f32; 3]) -> Instance {
+        Instance {
+            name: name.to_string(),
+            rect,
+            tint,
+        }
+    }
+
+    #[test]
+    fn transform_puts_the_rect_in_xywh_order() {
+        let t = instance_transform(&inst("bg", Rect::new(0.1, 0.2, 0.3, 0.4), [1.0; 3]), 1.0);
+        assert_eq!(t.rect, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn transform_carries_alpha_in_params_x() {
+        let i = inst("bg", Rect::fullscreen(), [1.0; 3]);
+        assert_eq!(instance_transform(&i, 0.25).params[0], 0.25);
+        assert_eq!(instance_transform(&i, 1.0).params[0], 1.0);
+        // alpha 为 0 时也要原样传下去（全黑是合法状态）
+        assert_eq!(instance_transform(&i, 0.0).params[0], 0.0);
+    }
+
+    /// tint 必须落在 params 的 yzw 上——shader 就是按这个约定读的。
+    /// 顺序错了会画成奇怪的颜色，而且很难看出来是这里的问题。
+    #[test]
+    fn transform_carries_tint_in_params_yzw() {
+        let i = inst("white", Rect::fullscreen(), [0.1, 0.2, 0.3]);
+        let t = instance_transform(&i, 0.5);
+        assert_eq!(t.params, [0.5, 0.1, 0.2, 0.3]);
+    }
+
+    /// 默认 tint 是白色 = 完全不着色，画面与加 tint 之前一致
+    #[test]
+    fn default_tint_is_white_so_plain_sprites_are_unchanged() {
+        let white = [1.0, 1.0, 1.0];
+        let t = instance_transform(&inst("bg", Rect::fullscreen(), white), 1.0);
+        assert_eq!(t.params, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// uniform 的布局必须和 shader 里的 `Transform` 一致：
+    /// 两个 vec4，共 32 字节。改字段时这条会先失败。
+    #[test]
+    fn uniform_layout_matches_the_shader() {
+        assert_eq!(std::mem::size_of::<TransformUniform>(), 32);
+        assert_eq!(std::mem::align_of::<TransformUniform>(), 4);
+        // 顶点布局：位置 + uv，各两个 f32
+        assert_eq!(std::mem::size_of::<Vertex>(), 16);
+    }
+
+    /// 实例对齐必须是 256 的倍数（wgpu 的 min_uniform_buffer_offset_alignment 下限），
+    /// 否则第 2 个实例开始就会写错位置。
+    #[test]
+    fn instance_alignment_is_valid() {
+        // 与 wgpu::Limits::default() 的 min_uniform_buffer_offset_alignment 一致
+        const { assert!(INSTANCE_ALIGN >= 256) };
+        assert_eq!(INSTANCE_ALIGN % 256, 0);
+        assert!(
+            (std::mem::size_of::<TransformUniform>() as u64) <= INSTANCE_ALIGN,
+            "一个 uniform 必须放得进一个槽位"
+        );
+    }
+
+    #[test]
+    fn rect_fullscreen_covers_the_whole_screen() {
+        let r = Rect::fullscreen();
+        assert_eq!((r.x, r.y, r.width, r.height), (0.0, 0.0, 1.0, 1.0));
     }
 }

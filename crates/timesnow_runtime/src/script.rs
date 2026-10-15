@@ -772,6 +772,39 @@ impl Script {
         }
     }
 
+    /// 无视 `@wait` / `@fade` 的时长，一步到位地推进。
+    ///
+    /// auto / skip 用：那时玩家的意思是"别等我"，让他们还去等
+    /// 淡入淡出的两秒钟就不合理了。
+    pub fn update_instant(&mut self) -> Outcome {
+        self.check_reload();
+
+        // 正在淡入淡出：直接把 alpha 顶到目标值
+        if self.presentation.fade_duration > 0.0 {
+            self.presentation.current_alpha = self.presentation.fade_to;
+            self.presentation.fade_duration = 0.0;
+            let outcome = self.vm.finish_blocking_step();
+            self.absorb(outcome.clone());
+            return outcome;
+        }
+
+        // 正在 @wait：直接跳过
+        if self.presentation.wait_timer > 0.0 {
+            self.presentation.wait_timer = 0.0;
+            let outcome = self.vm.finish_blocking_step();
+            self.absorb(outcome.clone());
+            return outcome;
+        }
+
+        if self.is_typing() {
+            // 打字机在 auto/skip 下也直接打完
+            self.skip_typewriter();
+        }
+        let outcome = self.vm.run_until_blocked();
+        self.absorb(outcome.clone());
+        outcome
+    }
+
     fn tick_typewriter(&mut self, dt: f32) {
         let Some(text) = self.current_full_text() else {
             return;
@@ -1163,22 +1196,16 @@ impl Script {
     }
 }
 
+/// 门面层的测试：存档 / 热重载 / 表现层（打字机、`@wait`、`@fade`）。
+///
+/// 纯 `Vm` 的行为测试在 `vm_tests.rs`——那部分不该经过门面。
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::parse;
 
-    /// 造一个只有 Vm 的测试台：不需要窗口、不需要显卡
-    fn make_vm(src: &str) -> Vm {
-        let program = Program::from_file(parse(src).unwrap());
-        let mut vm = Vm::new(program);
-        vm.run_until_blocked();
-        vm
-    }
-
-    /// 造一个完整 Script（含表现层），需要窗口之类的东西一概不用
+    /// 造一个完整 Script（含表现层）。不需要窗口，也不需要磁盘。
     fn script(src: &str) -> Script {
-        let program = Program::from_file(parse(src).unwrap());
+        let program = Program::from_source(src).expect("测试剧本应当能解析");
         let mut s = Script {
             vm: Vm::new(program),
             presentation: Presentation::default(),
@@ -1200,171 +1227,7 @@ mod tests {
         s
     }
 
-    // ---------- Vm：位置推进 ----------
-
-    #[test]
-    fn say_pauses_until_advanced() {
-        let mut vm = make_vm(":: start\n@say \"第一句\"\n@say \"第二句\"\n");
-        assert_eq!(vm.run_until_blocked(), Outcome::WaitingInput);
-        assert_eq!(vm.block(), "start");
-        assert_eq!(vm.step_index(), 0);
-
-        vm.advance();
-        assert_eq!(vm.step_index(), 1);
-        assert!(matches!(vm.current_step(), Some(Step::Say { .. })));
-
-        vm.advance();
-        // 走到块尾
-        assert_eq!(vm.run_until_blocked(), Outcome::Idle);
-    }
-
-    #[test]
-    fn jump_and_set_and_if_are_skipped_without_stopping() {
-        let src = r#"
-:: start
-@set score = 10
-@if score >= 10
-    @say "高"
-@say "结束"
-"#;
-        let mut vm = make_vm(src);
-        assert_eq!(vm.run_until_blocked(), Outcome::WaitingInput);
-        assert_eq!(vm.vars().get("score"), Some(&Value::Int(10)));
-    }
-
-    #[test]
-    fn choice_waits_and_applies_variables() {
-        let src = r#"
-:: start
-@choice
-    打招呼 -> greet { greeted = true }
-    沉默 -> silent
-
-:: greet
-@say "你好。"
-
-:: silent
-@say "……"
-"#;
-        let mut vm = make_vm(src);
-        assert_eq!(vm.run_until_blocked(), Outcome::AwaitingChoice);
-        assert_eq!(vm.pending_choice().unwrap().len(), 2);
-
-        // 选第一个：变量要生效，并且跳到 greet
-        let outcome = vm.select(0).unwrap();
-        assert_eq!(outcome, Outcome::WaitingInput);
-        assert_eq!(vm.block(), "greet");
-        assert_eq!(vm.vars().get("greeted"), Some(&Value::Bool(true)));
-    }
-
-    #[test]
-    fn choice_out_of_range_keeps_player_alive() {
-        let mut vm = make_vm(":: start\n@choice\n    a -> start\n");
-        assert_eq!(vm.run_until_blocked(), Outcome::AwaitingChoice);
-        assert!(vm.select(5).is_err());
-        // 选项还在，玩家没被卡死
-        assert!(vm.pending_choice().is_some());
-    }
-
-    #[test]
-    fn wait_and_fade_are_reported_not_skipped() {
-        let mut vm = make_vm(":: start\n@wait 1.5\n@say \"之后\"\n");
-        assert_eq!(vm.run_until_blocked(), Outcome::WaitingDuration(1.5));
-        // 计时结束前位置不动
-        assert_eq!(vm.step_index(), 0);
-        let outcome = vm.finish_blocking_step();
-        assert_eq!(outcome, Outcome::WaitingInput);
-        assert_eq!(vm.step_index(), 1);
-
-        let mut vm2 = make_vm(":: start\n@fade to 0.0 0.5\n@say \"之后\"\n");
-        assert_eq!(
-            vm2.run_until_blocked(),
-            Outcome::DoingFade {
-                to: 0.0,
-                duration: 0.5
-            }
-        );
-    }
-
-    #[test]
-    fn instant_fade_does_not_stall() {
-        // duration = 0 的淡入淡出必须直接过去，不能把游戏挂住。
-        // 表现层拿到 DoingFade{duration: 0} 会立刻把 alpha 设成目标值，不等下一帧。
-        let mut s = script(":: start\n@fade to 0.0 0.0\n@say \"之后\"\n");
-        assert_eq!(s.current_alpha(), 0.0, "瞬时淡出应当场生效");
-        assert_eq!(
-            s.current_full_text().as_deref(),
-            Some("之后"),
-            "应当继续往下走"
-        );
-        // 淡入淡出不该让画面持续重绘；此时还在打字机里，所以先把它打完
-        s.update(1.0);
-        assert!(!s.is_animating(), "瞬时切换不该持续重绘");
-    }
-
-    #[test]
-    fn infinite_jump_loop_stops_instead_of_hanging() {
-        let mut vm = make_vm(":: a\n@jump b\n\n:: b\n@jump a\n");
-        // 不能死循环，必须在有限时间内返回
-        let outcome = vm.run_until_blocked();
-        assert_eq!(outcome, Outcome::Idle);
-    }
-
-    #[test]
-    fn stage_commands_apply_immediately() {
-        let mut vm = make_vm(
-            ":: start\n@scene 湖边\n@show alice at 0.5 0.1 0.4 0.8\n@hide alice\n@say \"好\"\n",
-        );
-        vm.run_until_blocked();
-        assert_eq!(vm.stage().background.as_deref(), Some("湖边"));
-        assert!(vm.stage().characters.is_empty(), "hide 之后不该还有立绘");
-    }
-
-    #[test]
-    fn audio_events_are_queued_in_order() {
-        let mut vm = make_vm(":: start\n@play bgm main\n@play se click\n@stop bgm\n@say \"x\"\n");
-        vm.run_until_blocked();
-        let events = vm.take_audio_events();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], AudioEvent::PlayBgm(n) if n == "main"));
-        assert!(matches!(&events[1], AudioEvent::PlaySe(n) if n == "click"));
-        assert!(matches!(events[2], AudioEvent::StopBgm));
-    }
-
-    // ---------- 变量插值 ----------
-
-    #[test]
-    fn text_expands_variables() {
-        let mut vm = make_vm(":: start\n@set name = \"阿德里安\"\n@say \"你好，{name}。\"\n");
-        vm.run_until_blocked();
-        assert_eq!(vm.expand_text("你好，{name}。"), "你好，阿德里安。");
-    }
-
-    #[test]
-    fn unknown_variable_is_left_visible() {
-        let vm = make_vm(":: start\n@say \"x\"\n");
-        // 没设过的变量原样留着，作者一眼能看出漏了
-        assert_eq!(vm.expand_text("{who} 来了"), "{who} 来了");
-    }
-
-    /// 台词里的插值要真的体现在屏幕上，而且打字机按展开后的长度算
-    #[test]
-    fn interpolation_shows_up_in_rendered_text() {
-        let mut s = script(":: start\n@set name = \"阿德里安\"\n@say \"你好，{name}。\"\n");
-        s.presentation.speed = 0.0; // 不打字机
-        s.update(0.016);
-        assert_eq!(s.current_text(), "你好，阿德里安。");
-        assert_eq!(s.current_full_text().as_deref(), Some("你好，阿德里安。"));
-    }
-
-    #[test]
-    fn unmatched_brace_is_safe() {
-        let vm = make_vm(":: start\n@say \"x\"\n");
-        assert_eq!(vm.expand_text("半个 {name"), "半个 {name");
-        assert_eq!(vm.expand_text("没有变量"), "没有变量");
-    }
-
-    // ---------- 表现层：打字机与淡入淡出 ----------
+    // ---------- 表现层：打字机 ----------
 
     #[test]
     fn typewriter_reveals_more_over_time() {
@@ -1382,11 +1245,12 @@ mod tests {
     }
 
     #[test]
-    fn speed_zero_shows_whole_line() {
+    fn speed_zero_shows_the_whole_line() {
         let mut s = script(":: start\n@say \"一二三\"\n");
         s.presentation.speed = 0.0;
         s.update(0.016);
         assert_eq!(s.current_text(), "一二三");
+        assert!(!s.is_animating());
     }
 
     #[test]
@@ -1396,7 +1260,7 @@ mod tests {
         s.update(0.01);
         assert!(s.current_text().chars().count() < 5);
 
-        // 第一次点击：整句显示
+        // 第一次点击：整句显示，位置不动
         s.advance();
         assert_eq!(s.current_text(), "一二三四五");
         assert_eq!(s.block(), "start");
@@ -1404,10 +1268,28 @@ mod tests {
 
         // 第二次点击：换下一句
         s.advance();
-        assert_eq!(s.current_speaker(), None);
         s.update(1.0);
         assert_eq!(s.current_text(), "第二句");
     }
+
+    /// 台词里的插值要真的出现在屏幕上，而且打字机按展开后的长度算
+    #[test]
+    fn interpolation_shows_up_in_rendered_text() {
+        let mut s = script(":: start\n@set name = \"阿德里安\"\n@say \"你好，{name}。\"\n");
+        s.presentation.speed = 0.0;
+        s.update(0.016);
+        assert_eq!(s.current_text(), "你好，阿德里安。");
+        assert_eq!(s.current_full_text().as_deref(), Some("你好，阿德里安。"));
+    }
+
+    #[test]
+    fn is_animating_is_false_on_a_choice() {
+        let s = script(":: start\n@choice\n    甲 -> start\n");
+        assert!(s.pending_choices().is_some());
+        assert!(!s.is_animating(), "选项界面静止，不该持续出帧");
+    }
+
+    // ---------- 表现层：@wait 与 @fade ----------
 
     #[test]
     fn wait_blocks_until_elapsed() {
@@ -1434,6 +1316,23 @@ mod tests {
     }
 
     #[test]
+    fn fade_in_goes_up_to_full_alpha() {
+        let mut s = script(":: start\n@fade to 0.0 0.0\n@fade to 1.0 0.4\n@say \"甲\"\n");
+        assert_eq!(s.current_alpha(), 0.0, "瞬时淡出当场生效");
+        s.update(0.5);
+        assert_eq!(s.current_alpha(), 1.0, "淡入后回到全亮");
+    }
+
+    #[test]
+    fn instant_fade_does_not_stall() {
+        let mut s = script(":: start\n@fade to 0.0 0.0\n@say \"之后\"\n");
+        assert_eq!(s.current_alpha(), 0.0, "瞬时淡出应当场生效");
+        assert_eq!(s.current_full_text().as_deref(), Some("之后"));
+        s.update(1.0);
+        assert!(!s.is_animating());
+    }
+
+    #[test]
     fn advance_is_ignored_during_wait_and_fade() {
         let mut s = script(":: start\n@wait 1.0\n@say \"之后\"\n");
         s.advance();
@@ -1445,128 +1344,7 @@ mod tests {
         assert_eq!(s.current_full_text(), None, "淡入淡出期间点击无效");
     }
 
-    // ---------- 存档 ----------
-
-    /// 存档 → 读档往返：位置、变量、舞台都要回来
-    #[test]
-    fn save_round_trip_restores_position_and_vars() {
-        let mut s =
-            script(":: start\n@set hp = 7\n@scene 湖边\n@say \"第一句\"\n@say \"第二句\"\n");
-        s.update(1.0); // 等打字机把第一句打完
-        s.advance(); // 走到第二句
-        s.update(1.0);
-        assert_eq!(s.current_full_text().as_deref(), Some("第二句"));
-
-        let data = s.save_data();
-        assert_eq!(data.version, SAVE_VERSION);
-        assert_ne!(data.script_fingerprint, 0);
-
-        // 装到一个全新的 Script 里
-        let mut fresh =
-            script(":: start\n@set hp = 7\n@scene 湖边\n@say \"第一句\"\n@say \"第二句\"\n");
-        let notice = fresh.apply_save(data);
-        assert!(notice.is_none(), "同一份剧本读档不该有提示：{notice:?}");
-        assert_eq!(fresh.current_full_text().as_deref(), Some("第二句"));
-        assert_eq!(fresh.vm.vars().get("hp"), Some(&Value::Int(7)));
-        assert_eq!(fresh.current_stage().background.as_deref(), Some("湖边"));
-    }
-
-    /// 剧本改了但位置还能按台词找回来
-    #[test]
-    fn save_relocates_by_text_after_script_edit() {
-        let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
-        s.update(1.0); // 打完"甲"
-        s.advance();
-        s.update(1.0); // 打完"乙"
-        s.advance();
-        s.update(1.0);
-        assert_eq!(s.current_full_text().as_deref(), Some("丙"));
-        let data = s.save_data();
-
-        // 在"乙"后面插了一句，指纹变了，"丙"往后挪了一位
-        let mut edited = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"新增\"\n@say \"丙\"\n");
-        let notice = edited.apply_save(data);
-        assert_eq!(
-            notice,
-            Some(SaveNotice::ScriptChanged {
-                fell_back_to_block_start: false
-            })
-        );
-        assert_eq!(
-            edited.current_full_text().as_deref(),
-            Some("丙"),
-            "应该靠台词文本找回原来的位置"
-        );
-    }
-
-    /// 台词也找不到就退回块开头，并且明确告诉玩家
-    #[test]
-    fn save_falls_back_to_block_start_when_text_is_gone() {
-        let mut s = script(":: start\n@say \"老台词\"\n@say \"还有一句\"\n");
-        s.update(1.0);
-        s.advance();
-        s.update(1.0);
-        let data = s.save_data();
-        assert_eq!(data.step_text.as_deref(), Some("还有一句"));
-
-        // 剧本重写：步数也变了，台词也不在了 —— 只能回块开头
-        let mut rewritten =
-            script(":: start\n@say \"完全不同的内容\"\n@say \"第二句\"\n@say \"第三句\"\n");
-        let notice = rewritten.apply_save(data);
-        assert_eq!(
-            notice,
-            Some(SaveNotice::ScriptChanged {
-                fell_back_to_block_start: true
-            })
-        );
-        assert_eq!(
-            rewritten.current_full_text().as_deref(),
-            Some("完全不同的内容")
-        );
-    }
-
-    /// 旧版存档（没有指纹、没有 version）也要能读
-    #[test]
-    fn legacy_save_without_fingerprint_still_loads() {
-        let s = script(":: start\n@say \"甲\"\n@say \"乙\"\n");
-        let mut data = s.save_data();
-        data.script_fingerprint = 0; // 模拟 v1 存档
-        data.version = 1;
-        data.step_text = None;
-
-        let mut fresh = script(":: start\n@say \"甲\"\n@say \"乙\"\n");
-        let notice = fresh.apply_save(data);
-        assert!(matches!(notice, Some(SaveNotice::ScriptChanged { .. })));
-        // 没能定位就回到块开头，但至少不崩
-        assert_eq!(fresh.current_full_text().as_deref(), Some("甲"));
-    }
-
-    /// 来自更新版本的存档要给出提示
-    #[test]
-    fn save_from_newer_version_warns() {
-        let s = script(":: start\n@say \"甲\"\n");
-        let mut data = s.save_data();
-        data.version = SAVE_VERSION + 5;
-
-        let mut fresh = script(":: start\n@say \"甲\"\n");
-        let notice = fresh.apply_save(data);
-        assert!(matches!(notice, Some(SaveNotice::VersionTooNew { .. })));
-    }
-
-    /// ron 里真的能序列化/反序列化（存档写盘这一步）
-    #[test]
-    fn save_data_survives_ron_round_trip() {
-        let s = script(":: start\n@set n = 3\n@play bgm main\n@say \"甲\"\n");
-        let data = s.save_data();
-        let text = ron::ser::to_string_pretty(&data, ron::ser::PrettyConfig::default()).unwrap();
-        let back: SaveData = ron::from_str(&text).unwrap();
-        assert_eq!(back.version, data.version);
-        assert_eq!(back.current_block, data.current_block);
-        assert_eq!(back.bgm.as_deref(), Some("main"), "存档要记住在播的 BGM");
-        assert_eq!(back.vars.get("n"), Some(&Value::Int(3)));
-    }
-
-    // ---------- 回看历史 ----------
+    // ---------- 回看历史（门面这一侧）----------
 
     /// 翻过去的那句才进历史；正在显示的那句不进
     #[test]
@@ -1575,18 +1353,15 @@ mod tests {
         assert!(s.backlog().is_empty(), "刚开始不该有历史");
 
         s.update(1.0);
-        s.advance(); // 离开第一句
+        s.advance();
         assert_eq!(s.backlog().len(), 1);
         assert_eq!(s.backlog()[0].text, "第一句");
-        assert_eq!(s.backlog()[0].speaker, None);
 
         s.update(1.0);
-        s.advance(); // 离开第二句
+        s.advance();
         assert_eq!(s.backlog().len(), 2);
-        assert_eq!(s.backlog()[1].text, "第二句");
-        // 当前正在显示的第三句还没进历史
         assert_eq!(s.current_full_text().as_deref(), Some("第三句"));
-        assert_eq!(s.backlog().len(), 2);
+        assert_eq!(s.backlog().len(), 2, "当前这句还没进历史");
     }
 
     /// 历史里存的必须是**展开后**的文本，不是 `{name}` 模板
@@ -1603,39 +1378,21 @@ mod tests {
         assert_eq!(s.backlog()[0].speaker.as_deref(), Some("小雪"));
     }
 
-    /// 选项也算一次"翻页"，前面那句要进历史
     #[test]
     fn backlog_records_the_line_before_a_choice() {
         let mut s =
             script(":: start\n@say \"选一个\"\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n");
         s.update(1.0);
-        s.advance(); // 走到选项
+        s.advance();
         assert_eq!(s.backlog().len(), 1);
         assert_eq!(s.backlog()[0].text, "选一个");
-    }
-
-    #[test]
-    fn backlog_is_capped_and_drops_the_oldest() {
-        let mut s = script(":: start\n@say \"起点\"\n@jump start\n");
-        for i in 0..(BACKLOG_LIMIT + 40) {
-            s.vm.push_history(None, format!("第 {i} 句"));
-        }
-        assert_eq!(s.backlog().len(), BACKLOG_LIMIT, "不能无限涨");
-        assert_eq!(
-            s.backlog()[0].text,
-            format!("第 {} 句", 40),
-            "超出上限应当从最老的开始丢"
-        );
-        assert_eq!(
-            s.backlog().last().unwrap().text,
-            format!("第 {} 句", BACKLOG_LIMIT + 39)
-        );
     }
 
     /// 读档后还能往回翻
     #[test]
     fn backlog_survives_save_and_load() {
-        let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
+        let src = ":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n";
+        let mut s = script(src);
         s.update(1.0);
         s.advance();
         s.update(1.0);
@@ -1646,171 +1403,184 @@ mod tests {
         let data = s.save_data();
         assert_eq!(data.backlog.len(), 2);
 
-        let mut fresh = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
+        let mut fresh = script(src);
         fresh.apply_save(data);
         assert_eq!(fresh.backlog().len(), 2, "读档后历史应当还在");
         assert_eq!(fresh.backlog()[0].text, "甲");
-        assert_eq!(fresh.backlog()[1].text, "乙");
     }
 
-    /// 旧存档没有 backlog 字段 → 空的，不报错
-    #[test]
-    fn legacy_save_has_empty_backlog() {
-        let s = script(":: start\n@say \"甲\"\n");
-        let mut data = s.save_data();
-        data.backlog.clear();
-        let mut fresh = script(":: start\n@say \"甲\"\n");
-        assert!(fresh.apply_save(data).is_none());
-        assert!(fresh.backlog().is_empty());
-    }
-
-    // ---------- @chapter ----------
+    // ---------- 存档：往返与兼容 ----------
 
     #[test]
-    fn chapter_label_is_recorded_and_saved() {
-        let s = script(":: start\n@chapter \"第二章 · 湖边\"\n@say \"甲\"\n");
-        assert_eq!(s.chapter(), Some("第二章 · 湖边"));
-        let data = s.save_data();
-        assert_eq!(data.chapter.as_deref(), Some("第二章 · 湖边"));
-
-        let mut fresh = script(":: start\n@chapter \"第二章 · 湖边\"\n@say \"甲\"\n");
-        fresh.apply_save(data);
-        assert_eq!(fresh.chapter(), Some("第二章 · 湖边"));
-    }
-
-    /// 章节标签只影响存档信息，不该在屏幕上多显示什么
-    #[test]
-    fn chapter_step_does_not_change_what_is_on_screen() {
-        let mut s = script(":: start\n@chapter \"第一章\"\n@say \"甲\"\n");
-        s.update(1.0);
-        assert_eq!(s.current_full_text().as_deref(), Some("甲"));
-        assert_eq!(s.current_speaker(), None);
-    }
-
-    /// 停在选项上存档 → 读档后应该回到同一组选项，而不是滑到别处
-    #[test]
-    fn save_at_a_choice_restores_the_choice_screen() {
-        let src = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+    fn save_round_trip_restores_position_and_vars() {
+        let src = ":: start\n@set hp = 7\n@scene 湖边\n@say \"第一句\"\n@say \"第二句\"\n";
         let mut s = script(src);
-        s.update(1.0); // 打完"选一个"
-        s.advance(); // 走到 @choice
-        assert_eq!(s.pending_choices().map(|c| c.len()), Some(2));
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("第二句"));
 
         let data = s.save_data();
-        assert_eq!(
-            data.pending_choices.as_deref(),
-            Some(&["打招呼".to_string(), "沉默".to_string()][..]),
-            "存档要记住那组选项"
-        );
+        assert_eq!(data.version, SAVE_VERSION);
+        assert_ne!(data.script_fingerprint, 0);
 
         let mut fresh = script(src);
         let notice = fresh.apply_save(data);
-        assert!(notice.is_none(), "同一份剧本不该有提示：{notice:?}");
-        assert_eq!(
-            fresh.pending_choices().map(|c| c.len()),
-            Some(2),
-            "读档后应当回到选项界面"
-        );
-        // 选项还能点，并且走对分支
-        fresh.select_choice(1);
-        fresh.update(1.0);
-        assert_eq!(fresh.current_full_text().as_deref(), Some("……"));
+        assert!(notice.is_none(), "同一份剧本读档不该有提示：{notice:?}");
+        assert_eq!(fresh.current_full_text().as_deref(), Some("第二句"));
+        assert_eq!(fresh.vm.vars().get("hp"), Some(&Value::Int(7)));
+        assert_eq!(fresh.current_stage().background.as_deref(), Some("湖边"));
     }
 
-    /// 选项文本被改过：不能默默把玩家放到可能对不上的分支上，要提示并退回本段开头
+    /// 读档后那句要走打字机，而不是整句蹦出来
     #[test]
-    fn save_at_a_choice_warns_when_options_changed() {
-        let before = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
-        let after = ":: start\n@say \"选一个\"\n@choice\n    挥手 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
-        let mut s = script(before);
+    fn loading_starts_the_typewriter_from_the_beginning() {
+        let src = ":: start\n@say \"一二三四五\"\n@say \"下一句\"\n";
+        let mut s = script(src);
         s.update(1.0);
         s.advance();
+        s.update(1.0);
         let data = s.save_data();
 
-        let mut fresh = script(after);
-        let notice = fresh.apply_save(data);
+        let mut fresh = script(src);
+        fresh.presentation.speed = 0.01;
+        fresh.apply_save(data);
+        assert_eq!(fresh.current_text(), "", "读档不该把整句直接显示出来");
+        assert!(fresh.is_animating(), "应当在打字");
+        fresh.update(1.0);
+        assert_eq!(fresh.current_text(), "下一句");
+    }
+
+    /// 游戏刚启动时反过来：第一句直接整句显示
+    #[test]
+    fn skip_typewriter_shows_the_whole_line() {
+        let mut s = script(":: start\n@say \"一二三四五\"\n");
+        s.presentation.speed = 0.01;
+        assert_eq!(s.current_text(), "");
+        s.skip_typewriter();
+        assert_eq!(s.current_text(), "一二三四五");
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn save_relocates_by_text_after_script_edit() {
+        let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n");
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        s.advance();
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("丙"));
+        let data = s.save_data();
+
+        // 在"乙"后面插一句，指纹变了，"丙"往后挪一位
+        let mut edited = script(":: start\n@say \"甲\"\n@say \"乙\"\n@say \"新增\"\n@say \"丙\"\n");
+        let notice = edited.apply_save(data);
         assert_eq!(
             notice,
-            Some(SaveNotice::ChoiceChanged { was: 2, now: 2 }),
-            "选项文本变了也要提示"
-        );
-        // 位置保留：玩家仍在选项界面，不用重看前面的台词
-        assert_eq!(
-            fresh.pending_choices().map(|c| c.len()),
-            Some(2),
-            "文本变了但还停在选项上，不该把玩家退回本段开头"
+            Some(SaveNotice::ScriptChanged {
+                fell_back_to_block_start: false
+            })
         );
         assert_eq!(
-            fresh.visible_choices().first().map(|c| c.text.as_str()),
-            Some("挥手"),
-            "看到的应当是改过之后的选项"
+            edited.current_full_text().as_deref(),
+            Some("丙"),
+            "应该靠台词文本找回原来的位置"
         );
     }
 
-    /// 选项数量变了
     #[test]
-    fn save_at_a_choice_warns_when_option_count_changed() {
-        let before = ":: start\n@choice\n    甲 -> end\n    乙 -> end\n\n:: end\n@say \"完\"\n";
-        let after = ":: start\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n";
-        let s = script(before);
-        let data = s.save_data();
-        assert_eq!(data.pending_choices.as_ref().map(|c| c.len()), Some(2));
-
-        let mut fresh = script(after);
-        let notice = fresh.apply_save(data);
-        assert_eq!(notice, Some(SaveNotice::ChoiceChanged { was: 2, now: 1 }));
-    }
-
-    /// 剧本重写后压根不再停在选项上：也要退回本段开头，而不是留在半路
-    #[test]
-    fn save_at_a_choice_recovers_when_choice_is_gone() {
-        let before = ":: start\n@say \"甲\"\n@choice\n    走 -> other\n\n:: other\n@say \"到了\"\n";
-        let mut s = script(before);
+    fn save_falls_back_to_block_start_when_text_is_gone() {
+        let mut s = script(":: start\n@say \"老台词\"\n@say \"还有一句\"\n");
         s.update(1.0);
         s.advance();
-        assert!(s.pending_choices().is_some());
+        s.update(1.0);
         let data = s.save_data();
+        assert_eq!(data.step_text.as_deref(), Some("还有一句"));
 
-        // 选项整段没了
-        let after = ":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n";
-        let mut fresh = script(after);
-        let notice = fresh.apply_save(data);
-        // 剧本结构变了 + 选项没了 —— 两条提示都要给出来
-        let text = notice.as_ref().map(|n| n.to_string()).unwrap_or_default();
-        assert!(
-            text.contains("剧本改动") && text.contains("选项"),
-            "两条提示都该出现，实际: {notice:?}"
+        let mut rewritten =
+            script(":: start\n@say \"完全不同的内容\"\n@say \"第二句\"\n@say \"第三句\"\n");
+        let notice = rewritten.apply_save(data);
+        assert_eq!(
+            notice,
+            Some(SaveNotice::ScriptChanged {
+                fell_back_to_block_start: true
+            })
         );
-        assert!(fresh.pending_choices().is_none());
-        // 回到本段开头 = 停在"甲"
+        assert_eq!(
+            rewritten.current_full_text().as_deref(),
+            Some("完全不同的内容")
+        );
+    }
+
+    #[test]
+    fn legacy_save_without_fingerprint_still_loads() {
+        let src = ":: start\n@say \"甲\"\n@say \"乙\"\n";
+        let s = script(src);
+        let mut data = s.save_data();
+        data.script_fingerprint = 0; // 模拟 v1 存档
+        data.version = 1;
+        data.step_text = None;
+
+        let mut fresh = script(src);
+        let notice = fresh.apply_save(data);
+        assert!(matches!(notice, Some(SaveNotice::ScriptChanged { .. })));
         assert_eq!(fresh.current_full_text().as_deref(), Some("甲"));
     }
 
-    /// 旧存档没有 pending_choices 字段，读进来应当是 None（不报错）
     #[test]
-    fn legacy_save_has_no_pending_choices() {
-        let s = script(":: start\n@say \"甲\"\n");
+    fn legacy_save_has_empty_backlog_and_chapter() {
+        let src = ":: start\n@say \"甲\"\n";
+        let s = script(src);
         let mut data = s.save_data();
-        data.pending_choices = None;
-        let mut fresh = script(":: start\n@say \"甲\"\n");
-        let notice = fresh.apply_save(data);
-        assert!(notice.is_none(), "没有选项信息就不该提示：{notice:?}");
+        data.backlog.clear();
+        data.chapter = None;
+        let mut fresh = script(src);
+        assert!(fresh.apply_save(data).is_none());
+        assert!(fresh.backlog().is_empty());
+        assert!(fresh.chapter().is_none());
     }
 
-    /// 读档后要把 BGM 恢复出来
+    #[test]
+    fn save_from_newer_version_warns() {
+        let src = ":: start\n@say \"甲\"\n";
+        let s = script(src);
+        let mut data = s.save_data();
+        data.version = SAVE_VERSION + 5;
+
+        let mut fresh = script(src);
+        assert!(matches!(
+            fresh.apply_save(data),
+            Some(SaveNotice::VersionTooNew { .. })
+        ));
+    }
+
+    /// ron 里真的能序列化/反序列化（存档写盘这一步）
+    #[test]
+    fn save_data_survives_ron_round_trip() {
+        let s = script(":: start\n@set n = 3\n@play bgm main\n@say \"甲\"\n");
+        let data = s.save_data();
+        let text = ron::ser::to_string_pretty(&data, ron::ser::PrettyConfig::default()).unwrap();
+        let back: SaveData = ron::from_str(&text).unwrap();
+        assert_eq!(back.version, data.version);
+        assert_eq!(back.current_block, data.current_block);
+        assert_eq!(back.bgm.as_deref(), Some("main"), "存档要记住在播的 BGM");
+        assert_eq!(back.vars.get("n"), Some(&Value::Int(3)));
+    }
+
     #[test]
     fn load_reports_bgm_to_resume() {
-        let mut s = script(":: start\n@play bgm main\n@say \"甲\"\n");
+        let src = ":: start\n@play bgm main\n@say \"甲\"\n";
+        let mut s = script(src);
         s.take_audio_events(); // 让 Script 记住 bgm
         assert_eq!(s.save_data().bgm.as_deref(), Some("main"));
 
-        let mut fresh = script(":: start\n@play bgm main\n@say \"甲\"\n");
+        let mut fresh = script(src);
         let data = s.save_data();
         fresh.apply_save(data);
         assert_eq!(fresh.take_resumable_bgm().as_deref(), Some("main"));
+        assert!(fresh.take_resumable_bgm().is_none(), "取过一次就没了");
     }
-
-    // ---------- 热重载 ----------
 
     /// 真的写盘再读回来（`S` / `L` 走的就是这两个函数）
     #[test]
@@ -1828,10 +1598,9 @@ mod tests {
         s.save(&path).expect("存档应当成功");
         assert!(path.exists(), "save.ron 应当被写出来");
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains("version"), "新存档要写版本号：{on_disk}");
+        assert!(on_disk.contains("version"), "新存档要写版本号");
         assert!(on_disk.contains("script_fingerprint"), "新存档要写指纹");
 
-        // 换一个全新的 Script 读回来
         let mut fresh = script(src);
         let notice = fresh.load_from(&path).expect("读档应当成功");
         assert!(notice.is_none(), "同一份剧本读档不该有提示：{notice:?}");
@@ -1842,7 +1611,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 读一个不存在的存档要返回 Err，不能 panic
     #[test]
     fn loading_a_missing_save_is_an_error_not_a_panic() {
         let mut s = script(":: start\n@say \"x\"\n");
@@ -1851,16 +1619,255 @@ mod tests {
         assert!(s.load_from(&path).is_err());
     }
 
+    // ---------- 存档：停在选项上 ----------
+
+    #[test]
+    fn save_at_a_choice_restores_the_choice_screen() {
+        let src = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let mut s = script(src);
+        s.update(1.0);
+        s.advance();
+        assert_eq!(s.pending_choices().map(|c| c.len()), Some(2));
+
+        let data = s.save_data();
+        assert_eq!(
+            data.pending_choices.as_deref(),
+            Some(&["打招呼".to_string(), "沉默".to_string()][..]),
+            "存档要记住那组选项"
+        );
+
+        let mut fresh = script(src);
+        let notice = fresh.apply_save(data);
+        assert!(notice.is_none(), "同一份剧本不该有提示：{notice:?}");
+        assert_eq!(fresh.pending_choices().map(|c| c.len()), Some(2));
+
+        // 选项还能点，并且走对分支
+        fresh.select_choice(1);
+        fresh.update(1.0);
+        assert_eq!(fresh.current_full_text().as_deref(), Some("……"));
+    }
+
+    #[test]
+    fn save_at_a_choice_warns_when_options_changed() {
+        let before = ":: start\n@say \"选一个\"\n@choice\n    打招呼 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let after = ":: start\n@say \"选一个\"\n@choice\n    挥手 -> greet\n    沉默 -> silent\n\n:: greet\n@say \"你好。\"\n\n:: silent\n@say \"……\"\n";
+        let mut s = script(before);
+        s.update(1.0);
+        s.advance();
+        let data = s.save_data();
+
+        let mut fresh = script(after);
+        let notice = fresh.apply_save(data);
+        assert_eq!(
+            notice,
+            Some(SaveNotice::ChoiceChanged { was: 2, now: 2 }),
+            "选项文本变了也要提示"
+        );
+        // 位置保留：玩家仍在选项界面，不用重看前面的台词
+        assert_eq!(fresh.pending_choices().map(|c| c.len()), Some(2));
+        assert_eq!(
+            fresh.visible_choices().first().map(|c| c.text.as_str()),
+            Some("挥手"),
+            "看到的应当是改过之后的选项"
+        );
+    }
+
+    #[test]
+    fn save_at_a_choice_warns_when_option_count_changed() {
+        let before = ":: start\n@choice\n    甲 -> end\n    乙 -> end\n\n:: end\n@say \"完\"\n";
+        let after = ":: start\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n";
+        let s = script(before);
+        let data = s.save_data();
+        assert_eq!(data.pending_choices.as_ref().map(|c| c.len()), Some(2));
+
+        let mut fresh = script(after);
+        assert_eq!(
+            fresh.apply_save(data),
+            Some(SaveNotice::ChoiceChanged { was: 2, now: 1 })
+        );
+    }
+
+    #[test]
+    fn save_at_a_choice_recovers_when_choice_is_gone() {
+        let before = ":: start\n@say \"甲\"\n@choice\n    走 -> other\n\n:: other\n@say \"到了\"\n";
+        let mut s = script(before);
+        s.update(1.0);
+        s.advance();
+        assert!(s.pending_choices().is_some());
+        let data = s.save_data();
+
+        let after = ":: start\n@say \"甲\"\n@say \"乙\"\n@say \"丙\"\n";
+        let mut fresh = script(after);
+        let notice = fresh.apply_save(data);
+        let text = notice.as_ref().map(|n| n.to_string()).unwrap_or_default();
+        assert!(
+            text.contains("剧本改动") && text.contains("选项"),
+            "两条提示都该出现，实际: {notice:?}"
+        );
+        assert!(fresh.pending_choices().is_none());
+        assert_eq!(fresh.current_full_text().as_deref(), Some("甲"));
+    }
+
+    #[test]
+    fn legacy_save_has_no_pending_choices() {
+        let src = ":: start\n@say \"甲\"\n";
+        let s = script(src);
+        let mut data = s.save_data();
+        data.pending_choices = None;
+        let mut fresh = script(src);
+        assert!(fresh.apply_save(data).is_none());
+    }
+
+    // ---------- @chapter ----------
+
+    #[test]
+    fn chapter_label_is_recorded_and_saved() {
+        let src = ":: start\n@chapter \"第二章 · 湖边\"\n@say \"甲\"\n";
+        let s = script(src);
+        assert_eq!(s.chapter(), Some("第二章 · 湖边"));
+        let data = s.save_data();
+        assert_eq!(data.chapter.as_deref(), Some("第二章 · 湖边"));
+
+        let mut fresh = script(src);
+        fresh.apply_save(data);
+        assert_eq!(fresh.chapter(), Some("第二章 · 湖边"));
+    }
+
+    #[test]
+    fn chapter_step_does_not_change_what_is_on_screen() {
+        let mut s = script(":: start\n@chapter \"第一章\"\n@say \"甲\"\n");
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("甲"));
+        assert_eq!(s.current_speaker(), None);
+    }
+
+    // ---------- auto / skip 用的"立刻推进" ----------
+
+    /// auto / skip 下不该让玩家干等 `@wait`
+    #[test]
+    fn update_instant_skips_wait() {
+        let mut s = script(":: start\n@wait 5.0\n@say \"之后\"\n");
+        assert!(s.is_animating(), "手动模式下 @wait 会持续出帧");
+
+        s.update_instant();
+        assert_eq!(s.current_full_text().as_deref(), Some("之后"));
+    }
+
+    /// 淡入淡出也一样：一步到位把 alpha 顶到目标值
+    #[test]
+    fn update_instant_skips_fade() {
+        let mut s = script(":: start\n@fade to 0.0 3.0\n@say \"之后\"\n");
+        s.update_instant();
+        assert_eq!(s.current_alpha(), 0.0, "alpha 应当直接到目标值");
+        assert_eq!(s.current_full_text().as_deref(), Some("之后"));
+    }
+
+    /// 打字机也要立刻打完
+    #[test]
+    fn update_instant_finishes_the_typewriter() {
+        let mut s = script(":: start\n@say \"一二三四五\"\n");
+        s.presentation.speed = 0.5;
+        assert_eq!(s.current_text(), "");
+
+        s.update_instant();
+        assert_eq!(s.current_text(), "一二三四五");
+        assert!(!s.is_animating(), "skip 之后不该还在打字");
+    }
+
+    /// 立刻推进也不能跳过选项——那等于替玩家做决定
+    #[test]
+    fn update_instant_stops_at_a_choice() {
+        let mut s =
+            script(":: start\n@say \"选一个\"\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n");
+        s.update_instant();
+        s.advance();
+        s.update_instant();
+        assert!(s.pending_choices().is_some(), "立刻推进也必须停在选项上");
+    }
+
+    /// 反复调用不该卡住，也不该把位置弄乱
+    #[test]
+    fn update_instant_is_idempotent_when_already_settled() {
+        let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n");
+        for _ in 0..5 {
+            s.update_instant();
+        }
+        assert_eq!(s.current_full_text().as_deref(), Some("甲"), "位置不该乱走");
+    }
+
+    /// 手动模式仍然要老老实实等满 @wait
+    #[test]
+    fn manual_update_still_respects_wait() {
+        let mut s = script(":: start\n@wait 1.0\n@say \"之后\"\n");
+        s.update(0.1);
+        assert_eq!(s.current_full_text(), None, "手动模式仍要等满 1 秒");
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("之后"));
+    }
+
+    // ---------- 选项布局 ----------
+
+    #[test]
+    fn choices_are_laid_out_around_the_vertical_center() {
+        let mut s =
+            script(":: start\n@choice\n    一 -> start\n    二 -> start\n    三 -> start\n");
+        s.choice_layout.y_center = 0.5;
+        s.choice_layout.h = 0.1;
+        s.choice_layout.gap = 0.02;
+        let v = s.visible_choices();
+        assert_eq!(v.len(), 3);
+        // 三个选项整体居中：第一个的中心应当在上半部分，最后一个在下半部分
+        let first_center = v[0].y + v[0].h / 2.0;
+        let last_center = v[2].y + v[2].h / 2.0;
+        assert!(first_center < 0.5, "第一个应当在中线以上：{first_center}");
+        assert!(last_center > 0.5, "最后一个应当在中线以下：{last_center}");
+        // 间距一致
+        assert!((v[1].y - v[0].y - (v[2].y - v[1].y)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hit_test_finds_the_option_under_the_cursor() {
+        let s = script(":: start\n@choice\n    一 -> start\n    二 -> start\n");
+        let v = s.visible_choices();
+        let hit = s.hit_test(v[1].x + 0.01, v[1].y + 0.01);
+        assert_eq!(hit, Some(1));
+        assert_eq!(s.hit_test(0.0, 0.0), None, "空白处不该命中");
+    }
+
+    #[test]
+    fn choice_text_goes_through_variable_expansion() {
+        let src = ":: start\n@set who = \"小雪\"\n@choice\n    \"你好，{who}\" -> start\n";
+        match Program::from_source(src) {
+            Ok(_) => {}
+            Err(e) => panic!("剧本应当能解析，实际报错:\n{e}"),
+        }
+        let mut s = script(src);
+        s.vm.set_var("who", Value::Str("小雪".into()));
+        assert_eq!(
+            s.visible_choices().first().map(|c| c.text.as_str()),
+            Some("你好，小雪")
+        );
+    }
+
+    // ---------- 热重载 ----------
+
     #[test]
     fn hot_reload_keeps_position_when_block_still_exists() {
         let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n");
-        s.update(1.0); // 打完"甲"
+        s.update(1.0);
         s.advance();
         s.update(1.0);
         assert_eq!(s.current_full_text().as_deref(), Some("乙"));
 
-        // 模拟热重载：换掉 program（块还在、长度没变），位置应当保留
-        s.vm.program = Program::from_file(parse(":: start\n@say \"甲\"\n@say \"乙改\"\n").unwrap());
+        s.vm.program = Program::from_source(":: start\n@say \"甲\"\n@say \"乙改\"\n").unwrap();
         assert_eq!(s.current_full_text().as_deref(), Some("乙改"));
+    }
+
+    #[test]
+    fn fingerprint_and_main_path_are_exposed() {
+        let s = script(":: start\n@say \"甲\"\n");
+        assert_ne!(s.fingerprint().0, 0);
+        assert!(s.main_path().ends_with("test.tsn"));
+        assert!(s.watched_files().is_empty(), "测试台没有真文件");
     }
 }

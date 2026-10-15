@@ -187,8 +187,9 @@ impl TextRenderer {
         max_width: Option<f32>,
     ) {
         let size_scale = size_scale.max(0.1);
-        let font_size = (self.font_size * size_scale).max(6.0);
-        let line_height = (self.line_height * size_scale).max(font_size * 1.1);
+        let (font_size, line_height, max_width_px) =
+            box_metrics(self.font_size, self.line_height, size_scale, max_width);
+        let max_width = Some(max_width_px);
         let frame = self.frame;
 
         // 先把旧 entries 拿出来：这样既能复用 buffer，又能同时借用 font_system
@@ -211,10 +212,7 @@ impl TextRenderer {
                             .set_metrics(Metrics::new(font_size, line_height));
                     }
                     if entry.max_width != max_width || entry.font_size != font_size {
-                        entry.buffer.set_size(
-                            Some(max_width.unwrap_or(DEFAULT_MAX_WIDTH)),
-                            Some(BOX_HEIGHT),
-                        );
+                        entry.buffer.set_size(Some(max_width_px), Some(BOX_HEIGHT));
                     }
                     entry.buffer.set_text(
                         text,
@@ -237,10 +235,7 @@ impl TextRenderer {
             None => {
                 let mut buffer =
                     Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
-                buffer.set_size(
-                    Some(max_width.unwrap_or(DEFAULT_MAX_WIDTH)),
-                    Some(BOX_HEIGHT),
-                );
+                buffer.set_size(Some(max_width_px), Some(BOX_HEIGHT));
                 buffer.set_text(
                     text,
                     &Attrs::new().family(Family::SansSerif),
@@ -327,5 +322,79 @@ impl TextRenderer {
     pub fn set_font_metrics(&mut self, font_size: f32, line_height: f32) {
         self.font_size = font_size;
         self.line_height = line_height;
+    }
+}
+
+/// 文字盒的实际尺寸（像素）。抽出来是为了能单测：
+/// 以前这段埋在 `add_sized` 里，出了好几次"盒子超出屏幕 / 行距小于字号"的问题。
+///
+/// 返回 `(字号, 行高, 盒宽)`。
+pub fn box_metrics(
+    font_size: f32,
+    line_height: f32,
+    size_scale: f32,
+    max_width: Option<f32>,
+) -> (f32, f32, f32) {
+    let size_scale = size_scale.max(0.1);
+    let font = (font_size * size_scale).max(6.0);
+    // 行高必须比字号大，否则相邻两行会叠在一起
+    let line = (line_height * size_scale).max(font * 1.1);
+    let width = max_width.unwrap_or(DEFAULT_MAX_WIDTH).max(1.0);
+    (font, line, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_shrinks_font_and_line_together() {
+        let (font, line, _) = box_metrics(42.0, 54.0, 0.5, None);
+        assert!((font - 21.0).abs() < 0.01);
+        assert!((line - 27.0).abs() < 0.01, "行高也要跟着缩：{line}");
+    }
+
+    /// 这条是回归测试：UI 曾经沿用正文字号（42px）配 24px 行距，
+    /// 行高比字还小，回看历史每一行都叠在一起。
+    #[test]
+    fn line_height_is_always_taller_than_the_font() {
+        // 各种"行距给得太小"的输入都要被兜住
+        for (font, line) in [(42.0, 54.0), (42.0, 10.0), (42.0, 0.0), (100.0, 5.0)] {
+            for scale in [1.0, 0.5, 0.3, 0.2] {
+                let (f, l, _) = box_metrics(font, line, scale, None);
+                assert!(
+                    l > f,
+                    "font={font} line={line} scale={scale} → 字号 {f:.1} 行高 {l:.1} 叠一起了"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_scales_do_not_produce_degenerate_sizes() {
+        for scale in [0.0, -1.0, 0.001] {
+            let (font, line, width) = box_metrics(42.0, 54.0, scale, Some(0.0));
+            assert!(font >= 6.0, "字号不能小到看不见：{font}");
+            assert!(line > font);
+            assert!(width >= 1.0, "盒宽必须是正数：{width}");
+        }
+    }
+
+    #[test]
+    fn max_width_is_used_verbatim_when_sane() {
+        let (_, _, w) = box_metrics(42.0, 54.0, 1.0, Some(1234.0));
+        assert!((w - 1234.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn missing_max_width_falls_back_to_the_default() {
+        let (_, _, w) = box_metrics(42.0, 54.0, 1.0, None);
+        assert!((w - DEFAULT_MAX_WIDTH).abs() < 0.01);
+    }
+
+    /// 文字盒的高度必须容得下多行——单行的场景靠 `line` 保证，这里钉住常量。
+    #[test]
+    fn box_height_leaves_room_for_several_lines() {
+        const { assert!(BOX_HEIGHT >= 100.0, "文字盒太矮，多行会画不下") };
     }
 }

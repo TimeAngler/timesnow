@@ -58,6 +58,26 @@ const ERROR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// 屏幕提示显示多久
 const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// auto 模式：整句显示完之后再等这么久才自动翻页
+const AUTO_DELAY: f32 = 1.6;
+
+/// skip 模式：每次翻页的间隔（够快，又不至于一帧跳过整章）
+const SKIP_INTERVAL: f32 = 0.06;
+
+/// 设置界面里能调的项（顺序与 config 的 rows 一致）
+const SETTINGS_ROWS: usize = crate::config::AUDIO_ROWS;
+
+/// 怎么往下走。`Playing` 界面内部的三种模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvanceMode {
+    /// 等玩家点击
+    Manual,
+    /// 整句显示完后自动翻页
+    Auto,
+    /// 快速连续翻页，遇到选项停下
+    Skip,
+}
+
 /// 槽位界面的两种模式（画法一样，只是标题和确认动作不同）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotMode {
@@ -79,6 +99,8 @@ pub enum Screen {
     SaveMenu { cursor: usize },
     /// 读档界面（选一个槽位读出来）
     LoadMenu { cursor: usize },
+    /// 设置界面（音量）
+    Settings { row: usize },
 }
 
 impl Screen {
@@ -132,6 +154,10 @@ pub struct App {
     pending: Vec<PendingAction>,
     /// 屏幕上的提示（比如"已存档到槽位 3"），显示若干秒
     toast: Option<(String, Instant)>,
+    /// 当前推进模式（手动 / auto / skip）
+    mode: AdvanceMode,
+    /// 上次自动翻页的时间，用来算间隔
+    last_advance: Instant,
 }
 
 impl App {
@@ -214,6 +240,8 @@ impl App {
             slots: Vec::new(),
             pending: Vec::new(),
             toast: None,
+            mode: AdvanceMode::Manual,
+            last_advance: Instant::now(),
         })
     }
 
@@ -228,6 +256,16 @@ impl App {
         if let Some(script) = &mut self.script {
             script.update_layout(&self.config);
         }
+        self.sync_audio();
+    }
+
+    /// 把配置里的音量推给音频引擎
+    fn sync_audio(&mut self) {
+        let a = self.config.audio;
+        self.audio.set_master(a.master);
+        self.audio.set_bgm(a.bgm);
+        self.audio.set_se(a.se);
+        self.audio.set_muted(a.muted);
     }
 
     /// 剧本或配置出错时：每次重绘看一次相关文件，改好了就自动恢复。
@@ -463,6 +501,86 @@ impl App {
         r.render();
     }
 
+    /// 设置界面：音量。改动会立刻作用到音频引擎，退出时写回 config.toml。
+    fn draw_settings(&mut self, height: u32, row: usize) {
+        let ui = ui_metrics(height, self.config.text.font_size);
+        let rows = self.config.audio.rows();
+        let muted = self.config.audio.muted;
+
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+
+        r.clear_ui();
+        r.clear_text();
+        r.set_characters(&[]);
+        r.set_alpha(1.0);
+        r.add_ui_tinted("white", Rect::fullscreen(), (0.05, 0.05, 0.08));
+
+        let left = ui.margin_x;
+        let line_h = ui.line_h;
+        r.add_ui_text(
+            "设置   ↑/↓ 选择   ←/→ 调节   Esc 返回",
+            left,
+            ui.top,
+            ui.size_scale,
+            (255, 230, 200),
+        );
+
+        let body_top = ui.top + line_h * 1.8;
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let y = body_top + i as f32 * line_h;
+
+            // 静音那行显示开关，其余显示百分比
+            let shown = if i == 3 {
+                if *value > 0.5 { "开" } else { "关" }.to_string()
+            } else {
+                format!("{:>3}%", (value * 100.0).round() as i32)
+            };
+
+            if i == row {
+                r.add_ui_tinted(
+                    "white",
+                    Rect::new(left - 0.01, y - line_h * 0.12, 0.60, line_h * 0.95),
+                    (0.20, 0.20, 0.32),
+                );
+            }
+
+            let color = if i == row {
+                (255, 240, 180)
+            } else {
+                (220, 220, 220)
+            };
+            let line = format!("{}  {}", label, shown);
+            r.add_ui_text(&line, left + 0.01, y, ui.size_scale, color);
+        }
+
+        // 底部提示：静音中要显眼，否则玩家会以为音量坏了
+        let hint = if muted {
+            "当前静音中（总音量被掐掉）"
+        } else {
+            "调完自动保存到 config.toml"
+        };
+        let hint_color = if muted {
+            (255, 170, 170)
+        } else {
+            (150, 150, 150)
+        };
+        r.add_ui_text(hint, left, 0.94, ui.size_scale, hint_color);
+
+        r.render();
+    }
+
+    /// 当前推进模式的角标（auto / skip 要看得见，
+    /// 否则玩家不知道自己在自动过剧情）
+    fn mode_badge(&self) -> Option<(&'static str, (u8, u8, u8))> {
+        match self.mode {
+            AdvanceMode::Manual => None,
+            AdvanceMode::Auto => Some(("▶ 自动", (180, 230, 255))),
+            AdvanceMode::Skip => Some(("▶▶ 跳过中", (255, 220, 160))),
+        }
+    }
+
     /// 提示条是否还要显示；过期就清掉（并且不再要求出帧）。
     fn expire_toast(&mut self) {
         if let Some((_, since)) = &self.toast
@@ -554,6 +672,14 @@ impl App {
             return;
         };
         match key {
+            // 键盘也能推进对话——只有鼠标能翻页的话，
+            // 不想碰鼠标 / 没有鼠标的人就卡住了。
+            // 选项界面下不动手：选哪个该由玩家明确决定。
+            PhysicalKey::Code(KeyCode::Space) | PhysicalKey::Code(KeyCode::Enter) => {
+                if script.pending_choices().is_none() {
+                    script.advance();
+                }
+            }
             PhysicalKey::Code(KeyCode::Digit1) => script.select_choice(0),
             PhysicalKey::Code(KeyCode::Digit2) => script.select_choice(1),
             PhysicalKey::Code(KeyCode::Digit3) => script.select_choice(2),
@@ -567,6 +693,18 @@ impl App {
             PhysicalKey::Code(KeyCode::PageUp) | PhysicalKey::Code(KeyCode::KeyB) => {
                 self.screen = Screen::Backlog { scroll: 0 };
                 self.needs_redraw = true;
+            }
+            // 设置（音量）
+            PhysicalKey::Code(KeyCode::Escape) | PhysicalKey::Code(KeyCode::KeyO) => {
+                self.screen = Screen::Settings { row: 0 };
+                self.needs_redraw = true;
+            }
+            // auto / skip
+            PhysicalKey::Code(KeyCode::KeyA) => {
+                self.toggle_mode(AdvanceMode::Auto);
+            }
+            PhysicalKey::Code(KeyCode::KeyK) | PhysicalKey::Code(KeyCode::ControlLeft) => {
+                self.toggle_mode(AdvanceMode::Skip);
             }
             _ => {}
         }
@@ -649,6 +787,57 @@ impl App {
     fn clamp_backlog_scroll(&self, scroll: usize) -> usize {
         let total = self.script.as_ref().map(|s| s.backlog().len()).unwrap_or(0);
         scroll.min(total.saturating_sub(1))
+    }
+
+    /// 切换推进模式（再按一次同一个键就回到手动）
+    fn toggle_mode(&mut self, mode: AdvanceMode) {
+        self.mode = if self.mode == mode {
+            AdvanceMode::Manual
+        } else {
+            mode
+        };
+        self.last_advance = Instant::now();
+        self.needs_redraw = true;
+    }
+
+    /// 设置界面
+    fn handle_settings_key(&mut self, key: PhysicalKey, row: usize) {
+        use crate::config::AUDIO_STEP;
+
+        match key {
+            PhysicalKey::Code(KeyCode::Escape) | PhysicalKey::Code(KeyCode::KeyO) => {
+                // 退出时写回 config.toml，下次启动还在
+                match self.config.save() {
+                    Ok(()) => println!("设置已保存到 config.toml"),
+                    Err(e) => eprintln!("保存设置失败: {e}"),
+                }
+                self.screen = Screen::Playing;
+            }
+            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                self.screen = Screen::Settings {
+                    row: (row + 1) % SETTINGS_ROWS,
+                };
+            }
+            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                self.screen = Screen::Settings {
+                    row: if row == 0 { SETTINGS_ROWS - 1 } else { row - 1 },
+                };
+            }
+            PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                self.config.audio.adjust(row, -AUDIO_STEP);
+                self.sync_audio();
+            }
+            PhysicalKey::Code(KeyCode::ArrowRight) | PhysicalKey::Code(KeyCode::Enter) => {
+                self.config.audio.adjust(row, AUDIO_STEP);
+                self.sync_audio();
+            }
+            PhysicalKey::Code(KeyCode::KeyM) => {
+                self.config.audio.adjust(3, 0.0);
+                self.sync_audio();
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
     }
 }
 
@@ -834,6 +1023,11 @@ impl ApplicationHandler for App {
                         self.expire_toast();
                         return;
                     }
+                    Screen::Settings { row } => {
+                        self.draw_settings(height, row);
+                        self.expire_toast();
+                        return;
+                    }
                     Screen::Playing => {}
                 }
 
@@ -844,6 +1038,7 @@ impl ApplicationHandler for App {
 
                 // 提示条文字先取出来（下面 script 会长期借用 self，不能再读 self）
                 let toast_text = self.toast_text();
+                let badge = self.mode_badge();
 
                 // 走到这里 script 一定有值；保险起见取不到就直接重试加载
                 let Some(script) = self.script.as_mut() else {
@@ -851,7 +1046,34 @@ impl ApplicationHandler for App {
                     return;
                 };
 
-                script.update(dt);
+                // auto / skip：不等玩家点击也能往下走。
+                // 这会在剧本这一帧里立刻解决掉 @wait / @fade 的计时。
+                match self.mode {
+                    AdvanceMode::Manual => {
+                        script.update(dt);
+                    }
+                    AdvanceMode::Auto => {
+                        script.update_instant();
+                        let waiting = script.pending_choices().is_none();
+                        if waiting
+                            && !script.is_animating()
+                            && self.last_advance.elapsed().as_secs_f32() >= AUTO_DELAY
+                        {
+                            script.advance();
+                            self.last_advance = now;
+                        }
+                    }
+                    AdvanceMode::Skip => {
+                        script.update_instant();
+                        if script.pending_choices().is_some() {
+                            // 遇到选项就停下，别替玩家做决定
+                            self.mode = AdvanceMode::Manual;
+                        } else if self.last_advance.elapsed().as_secs_f32() >= SKIP_INTERVAL {
+                            script.advance();
+                            self.last_advance = now;
+                        }
+                    }
+                }
 
                 for ev in script.take_audio_events() {
                     match ev {
@@ -949,6 +1171,12 @@ impl ApplicationHandler for App {
                         );
                     }
 
+                    // auto / skip 角标放右上角，安静但看得见
+                    if let Some((text, color)) = badge {
+                        let ui = ui_metrics(height, t.font_size);
+                        r.add_ui_text(text, 0.86, 0.03, ui.size_scale, color);
+                    }
+
                     r.render();
                 }
 
@@ -1011,6 +1239,7 @@ impl ApplicationHandler for App {
                     Screen::LoadMenu { cursor } => {
                         self.handle_slot_key(event.physical_key, cursor, SlotMode::Load)
                     }
+                    Screen::Settings { row } => self.handle_settings_key(event.physical_key, row),
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1220,6 +1449,33 @@ mod tests {
         assert!(Screen::Backlog { scroll: 0 }.pauses_script());
         assert!(Screen::SaveMenu { cursor: 1 }.pauses_script());
         assert!(Screen::LoadMenu { cursor: 1 }.pauses_script());
+        assert!(Screen::Settings { row: 0 }.pauses_script());
+    }
+
+    /// auto 的间隔必须明显比 skip 长，否则两个模式没区别
+    #[test]
+    fn auto_is_slower_than_skip() {
+        // 编译期就能查：这两个常量要是调成一样近，构建直接失败
+        const {
+            assert!(
+                AUTO_DELAY > SKIP_INTERVAL * 5.0,
+                "auto 与 skip 的间隔差得太近，两个模式会没区别"
+            )
+        };
+        const { assert!(SKIP_INTERVAL > 0.0, "skip 间隔必须为正，否则会一帧跳过整章") };
+    }
+
+    /// 设置界面的行数要和配置里能调的项一致
+    #[test]
+    fn settings_rows_match_the_config() {
+        let rows = crate::config::AudioConfig::default().rows();
+        assert_eq!(rows.len(), SETTINGS_ROWS);
+        assert_eq!(rows.len(), crate::config::AUDIO_ROWS);
+        assert!(rows[3].0.contains("静音"), "最后一行应当是静音开关");
+        // 前三行是音量，初值都在 0~1
+        for (label, v) in rows.iter().take(3) {
+            assert!(*v >= 0.0 && *v <= 1.0, "{label} 的初值越界: {v}");
+        }
     }
 
     /// 槽位能用数字键直接选（存档界面里省一次上下键）

@@ -119,12 +119,19 @@ color = [220, 220, 220]
 | | `y_center` | Vertical center of the choice group, `0.5` = middle of the screen |
 | | `text_pad_*` | Text offset within the choice box |
 | | `color` | Choice text color |
+| `[audio]` | `master` | Master volume, `0.0`–`1.0` |
+| | `bgm` / `se` | Music / sound-effect volume |
+| | `muted` | Mute switch |
 
 **Every field is optional — omit it and you get the default.** The values above *are* the defaults,
 so you can paste the whole block or keep only the lines you want to change.
 Body text wraps automatically at the textbox width.
 
 **Change any of these, save, and the game updates instantly — no restart, no rebuild.**
+
+**Volume can be changed in-game:** press `Esc` or `O` for the settings screen, arrow keys to pick
+and adjust; it writes back to `config.toml` when you leave (note: writing back re-serializes the whole
+file, so **your comments are lost**).
 
 ## 6. Create the asset directories
 
@@ -358,6 +365,33 @@ Press `PageUp` (or `B`) for the backlog and scroll up; `PageUp`/`PageDown` or th
 it, `Esc` returns. The last 200 lines are kept, and they travel with your saves — loading a slot
 keeps its history.
 
+### Auto-play and skip
+
+- `A` — **auto-play**: advances 1.6s after a line finishes typing, with "▶ 自动" in the top-right;
+  press `A` again to go back to manual
+- `K` (or hold `Ctrl`) — **skip**: pages through quickly, showing "▶▶ 跳过中";
+  it **stops at choices** rather than deciding for you
+
+Neither mode makes you wait through `@wait` and `@fade` — those mean "don't wait for me".
+
+### Changing the volume
+
+Press `Esc` or `O`:
+
+```
+设置   ↑/↓ 选择   ←/→ 调节   Esc 返回
+总音量   80%
+BGM      70%
+音效     90%
+静音     关
+
+调完自动保存到 config.toml
+```
+
+Changes apply immediately, including to the BGM already playing. Leaving the screen writes back to
+`config.toml`, so your values survive a restart. **The write-back re-serializes the whole file, so
+comments are lost** — a deliberate trade-off.
+
 ### How do I label chapters?
 
 Put a line in your script and the save screen will show the chapter name:
@@ -368,6 +402,20 @@ Put a line in your script and the save screen will show the chapter name:
 ```
 
 It only gives saves a readable label; it doesn't change what's on screen.
+
+### All the keys
+
+| Key | Action |
+|---|---|
+| Left click / `Space` / `Enter` | Advance the dialogue (pressing once mid-typing shows the whole line) |
+| `1`–`4` | Pick the matching choice |
+| `S` / `L` | Open the save / load screen |
+| `F5` / `F9` | Quick save / quick load (slot 1) |
+| `PageUp` / `B` | Open the backlog |
+| `A` | Auto-play (press again to turn off) |
+| `K` / `Ctrl` | Skip (press again to turn off; stops at choices) |
+| `Esc` / `O` | Open settings (volume) |
+| `Esc` | Close the current screen |
 
 ## Next
 

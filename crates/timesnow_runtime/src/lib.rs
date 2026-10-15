@@ -7,6 +7,9 @@ pub mod saves;
 pub mod script;
 pub mod validate;
 
+#[cfg(test)]
+mod vm_tests;
+
 pub use app::App;
 pub use config::Config;
 pub use program::{Fingerprint, Program, SAVE_VERSION, SaveData, SaveNotice};

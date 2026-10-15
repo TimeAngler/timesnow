@@ -19,7 +19,7 @@ pub struct WgpuRenderer {
 
     /// 本次窗口事件里是否已经渲染过一帧。
     /// 由 `window_event` 在开头发 `reset_frame_guard()` 清掉。
-    rendered_this_event: bool,
+    frame_guard: FrameGuard,
 }
 
 impl WgpuRenderer {
@@ -91,7 +91,7 @@ impl WgpuRenderer {
             characters: Vec::new(),
             ui: Vec::new(),
             ui_tinted: Vec::new(),
-            rendered_this_event: false,
+            frame_guard: FrameGuard::default(),
         }
     }
 
@@ -105,18 +105,17 @@ impl WgpuRenderer {
 
     /// 每处理一个窗口事件前调用一次，允许这一轮渲染一帧。
     pub fn reset_frame_guard(&mut self) {
-        self.rendered_this_event = false;
+        self.frame_guard.reset();
     }
 
     pub fn render(&mut self) {
         // 一次 `render()` = 一次 `get_current_texture()` + 一次 `present()`。
         // 调用方在同一个窗口事件里调两次会向 swapchain 连要两张纹理，
         // 表现就是画面一闪一闪。这里直接拒绝第二次，把问题暴露在日志里。
-        if self.rendered_this_event {
+        if !self.frame_guard.claim() {
             eprintln!("警告：一次窗口事件里调了两次 render()，第二次已忽略（会导致闪烁）");
             return;
         }
-        self.rendered_this_event = true;
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
@@ -161,18 +160,16 @@ impl WgpuRenderer {
             });
 
         self.sprite.begin_frame();
-        if let Some(bg) = &self.background {
-            self.sprite.queue(bg, Rect::fullscreen());
-        }
-        for (name, rect) in &self.characters {
-            self.sprite.queue(name, *rect);
-        }
-        for (name, rect) in &self.ui {
-            self.sprite.queue(name, *rect);
-        }
-        // 带着色的覆盖层最后画（底、遮罩、槽位框）
-        for (name, rect, tint) in &self.ui_tinted {
-            self.sprite.queue_tinted(name, *rect, *tint);
+        for (name, rect, tint) in frame_quads(
+            self.background.as_deref(),
+            &self.characters,
+            &self.ui,
+            &self.ui_tinted,
+        ) {
+            match tint {
+                Some(tint) => self.sprite.queue_tinted(name, rect, tint),
+                None => self.sprite.queue(name, rect),
+            }
         }
         self.sprite.reset_tint();
 
@@ -326,5 +323,165 @@ impl WgpuRenderer {
 
     pub fn update_font_config(&mut self, font_size: f32, line_height: f32) {
         self.text.set_font_metrics(font_size, line_height);
+    }
+}
+
+/// 一帧要画的四边形，**按绘制顺序**排好。
+///
+/// 顺序：背景 → 立绘 → UI → 带着色的覆盖层。
+/// 这里画错会导致 UI 被背景盖住或者覆盖层底色压掉槽位文字，
+/// 而且只有跑起来才看得出来，所以抽成纯函数钉住。
+///
+/// 返回 `(纹理名, 位置, 可选 tint)`；tint 为 `None` 表示原样画。
+fn frame_quads<'a>(
+    background: Option<&'a str>,
+    characters: &'a [(String, Rect)],
+    ui: &'a [(String, Rect)],
+    ui_tinted: &'a [(String, Rect, [f32; 3])],
+) -> Vec<(&'a str, Rect, Option<[f32; 3]>)> {
+    let mut quads = Vec::with_capacity(1 + characters.len() + ui.len() + ui_tinted.len());
+    if let Some(bg) = background {
+        quads.push((bg, Rect::fullscreen(), None));
+    }
+    for (name, rect) in characters {
+        quads.push((name.as_str(), *rect, None));
+    }
+    for (name, rect) in ui {
+        quads.push((name.as_str(), *rect, None));
+    }
+    for (name, rect, tint) in ui_tinted {
+        quads.push((name.as_str(), *rect, Some(*tint)));
+    }
+    quads
+}
+
+/// 一次窗口事件里只允许渲染并 present 一帧。
+///
+/// 为什么需要它：`render()` 会 `get_current_texture()` + `present()`。
+/// 同一个事件里调两次就等于向 swapchain 连要两张纹理，
+/// 表现是画面一闪一闪——这个坑真踩过（提示条单独 render 了一次）。
+#[derive(Default)]
+pub struct FrameGuard {
+    rendered: bool,
+}
+
+impl FrameGuard {
+    /// 新一轮事件开始，允许渲染一帧
+    pub fn reset(&mut self) {
+        self.rendered = false;
+    }
+
+    /// 认领这一帧。已经认领过就返回 false（调用方应当跳过渲染并警告）。
+    pub fn claim(&mut self) -> bool {
+        if self.rendered {
+            return false;
+        }
+        self.rendered = true;
+        true
+    }
+
+    pub fn rendered(&self) -> bool {
+        self.rendered
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(x: f32) -> Rect {
+        Rect::new(x, 0.0, 0.1, 0.1)
+    }
+
+    #[test]
+    fn frame_guard_allows_exactly_one_render_per_round() {
+        let mut g = FrameGuard::default();
+        g.reset();
+        assert!(g.claim(), "第一次应当允许");
+        assert!(!g.claim(), "同一轮里第二次必须拒绝（否则画面会闪）");
+        assert!(!g.claim());
+
+        g.reset();
+        assert!(g.claim(), "下一轮应当重新允许");
+    }
+
+    #[test]
+    fn frame_guard_starts_claimable() {
+        let mut g = FrameGuard::default();
+        assert!(!g.rendered(), "默认状态是没渲染过，第一帧不该被拦");
+        assert!(g.claim());
+        assert!(g.rendered());
+    }
+
+    #[test]
+    fn draw_order_is_background_characters_ui_then_overlays() {
+        let chars = [("alice".to_string(), r(0.5))];
+        let ui = [("textbox".to_string(), r(0.1))];
+        let overlays = [("white".to_string(), Rect::fullscreen(), [0.1, 0.1, 0.1])];
+
+        let quads = frame_quads(Some("lake"), &chars, &ui, &overlays);
+        let names: Vec<&str> = quads.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(names, ["lake", "alice", "textbox", "white"]);
+    }
+
+    /// 覆盖层必须排在最后——它就是靠"后画"盖住底下的东西
+    #[test]
+    fn tinted_overlays_come_after_everything_else() {
+        let chars = [("a".to_string(), r(0.1)), ("b".to_string(), r(0.2))];
+        let ui = [("box".to_string(), r(0.3))];
+        let overlays = [
+            ("white".to_string(), Rect::fullscreen(), [0.0, 0.0, 0.0]),
+            ("white".to_string(), r(0.4), [0.2, 0.2, 0.2]),
+        ];
+        let quads = frame_quads(Some("bg"), &chars, &ui, &overlays);
+
+        let first_overlay = quads
+            .iter()
+            .position(|(_, _, t)| t.is_some())
+            .expect("应当有覆盖层");
+        let last_plain = quads
+            .iter()
+            .rposition(|(_, _, t)| t.is_none())
+            .expect("应当有普通层");
+        assert!(
+            first_overlay > last_plain,
+            "覆盖层不能夹在普通层中间：{quads:?}"
+        );
+    }
+
+    #[test]
+    fn background_always_covers_the_screen() {
+        let quads = frame_quads(Some("bg"), &[], &[], &[]);
+        let (name, rect, tint) = quads[0];
+        assert_eq!(name, "bg");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+        assert!(tint.is_none(), "背景不该被着色");
+    }
+
+    #[test]
+    fn no_background_means_no_first_quad() {
+        let quads = frame_quads(None, &[], &[], &[]);
+        assert!(quads.is_empty());
+    }
+
+    #[test]
+    fn two_characters_keep_their_order() {
+        // 后 @show 的画在上面，靠的就是这个顺序
+        let chars = [("left".to_string(), r(0.1)), ("right".to_string(), r(0.6))];
+        let quads = frame_quads(None, &chars, &[], &[]);
+        assert_eq!(quads[0].0, "left");
+        assert_eq!(quads[1].0, "right");
+    }
+
+    #[test]
+    fn tint_is_only_attached_to_overlays() {
+        let ui = [("textbox".to_string(), r(0.1))];
+        let overlays = [("white".to_string(), r(0.2), [0.3, 0.4, 0.5])];
+        let quads = frame_quads(None, &[], &ui, &overlays);
+        assert!(quads[0].2.is_none(), "普通 UI 不该带 tint");
+        assert_eq!(quads[1].2, Some([0.3, 0.4, 0.5]));
     }
 }
