@@ -16,6 +16,9 @@ use winit::window::{Window, WindowAttributes, WindowId};
 /// 错误页最多铺多少行，超出的截断（具体数目在渲染时按窗口高度再收紧）
 const ERROR_PAGE_MAX_LINES: usize = 40;
 
+/// 错误页下多久查一次"文件改好了没"。太密会白烧 CPU，太疏显得卡。
+const ERROR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<WgpuRenderer>,
@@ -35,6 +38,10 @@ pub struct App {
     watched: Vec<(PathBuf, SystemTime)>,
     /// 上次处理过的 config.toml 时间戳（错误页恢复时用）
     config_mtime_recorded: SystemTime,
+    /// 是否需要再画一帧。false 且没有动画时事件循环会进入 Wait，不再空转。
+    needs_redraw: bool,
+    /// 进入错误页的时刻，用来控制"多久查一次文件"
+    error_since: Option<Instant>,
 }
 
 impl App {
@@ -85,6 +92,7 @@ impl App {
         };
 
         let textbox_rect = textbox_rect(&config);
+        let error_since = script_error.as_ref().map(|_| Instant::now());
 
         Ok(App {
             window: None,
@@ -99,6 +107,9 @@ impl App {
             textbox_rect,
             watched,
             config_mtime_recorded: mtime_of(&project_dir.join("config.toml")),
+            // 第一帧总要画
+            needs_redraw: true,
+            error_since,
         })
     }
 
@@ -145,6 +156,7 @@ impl App {
             }
             Err(e) => {
                 self.script_error = Some(e);
+                self.error_since = Some(Instant::now());
                 return;
             }
         }
@@ -162,10 +174,14 @@ impl App {
                     .collect();
                 self.script = Some(script);
                 self.script_error = None;
+                // 恢复后立刻把自己唤醒重画，不用等下一次轮询
+                self.error_since = None;
+                self.needs_redraw = true;
             }
             Err(e) => {
                 eprintln!("剧本仍有问题:\n{e}");
                 self.script_error = Some(e.to_string());
+                self.error_since = Some(Instant::now());
                 self.watched = watch_all_scripts(&self.project_dir);
             }
         }
@@ -306,6 +322,9 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // 输入、缩放都要重画一帧
+        self.needs_redraw = true;
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -314,6 +333,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // 这一帧先认领掉；下面如果发现还有动画/错误页，会再置回 true
+                self.needs_redraw = false;
+
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32();
                 self.last_frame = now;
@@ -332,6 +354,7 @@ impl ApplicationHandler for App {
                     self.try_recover();
                     if self.script_error.is_some() {
                         self.draw_error_page(width, height);
+                        self.needs_redraw = true;
                         return;
                     }
                 }
@@ -432,6 +455,9 @@ impl ApplicationHandler for App {
                     r.set_alpha(alpha);
                     r.render();
                 }
+
+                // 还在演出中就再排一帧；静止时交给 about_to_wait 去 Wait
+                self.needs_redraw = script.is_animating();
             }
             WindowEvent::MouseInput {
                 state: winit::event::ElementState::Pressed,
@@ -457,6 +483,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == winit::event::ElementState::Pressed {
+                    // 读档可能要恢复 BGM，先攒着，等借用结束再播
+                    let mut pending_bgm: Option<String> = None;
                     let Some(script) = self.script.as_mut() else {
                         return;
                     };
@@ -473,11 +501,28 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::KeyL) => {
                             let path = self.project_dir.join("save.ron");
-                            if let Err(e) = script.load_from(&path) {
-                                eprintln!("读档失败: {e}");
+                            match script.load_from(&path) {
+                                Ok(notice) => {
+                                    // 剧本改动过 / 存档比引擎新，都在这里告诉玩家
+                                    if let Some(notice) = notice {
+                                        eprintln!("读档提示: {notice}");
+                                    }
+                                    // 读档要接着播存档里那首 BGM
+                                    if let Some(bgm) = script.take_resumable_bgm() {
+                                        pending_bgm = Some(bgm);
+                                    }
+                                }
+                                Err(e) => eprintln!("读档失败: {e}"),
                             }
                         }
                         _ => {}
+                    }
+
+                    // 借用已经结束，可以动 audio 了
+                    if let Some(bgm) = pending_bgm
+                        && let Err(e) = self.audio.play_bgm(&bgm)
+                    {
+                        eprintln!("恢复 BGM 失败: {e}");
                     }
                 }
             }
@@ -488,11 +533,42 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 只在需要时才排下一帧；否则让事件循环等消息（ControlFlow::Wait），
+        // 这样静止画面时不再满帧空转。
+        if self.needs_redraw
+            && let Some(w) = &self.window
+        {
             w.request_redraw();
         }
+        event_loop.set_control_flow(redraw_after(
+            self.needs_redraw,
+            self.script_error.is_some(),
+            self.error_since,
+        ));
     }
+}
+
+/// 决定事件循环怎么等下一轮：
+/// - 还要重画 → `Poll`（尽量马上再画一帧）
+/// - 静止 → `Wait`（睡到有输入/窗口事件）
+/// - 错误页 → `Wait`，但每 0.5 秒醒一次去查文件有没有被改好
+fn redraw_after(
+    needs_redraw: bool,
+    has_error: bool,
+    error_since: Option<Instant>,
+) -> winit::event_loop::ControlFlow {
+    use winit::event_loop::ControlFlow;
+
+    if needs_redraw {
+        return ControlFlow::Poll;
+    }
+    if has_error {
+        let elapsed = error_since.map(|t| t.elapsed()).unwrap_or_default();
+        let budget = ERROR_POLL_INTERVAL.saturating_sub(elapsed);
+        return ControlFlow::WaitUntil(Instant::now() + budget);
+    }
+    ControlFlow::Wait
 }
 
 #[cfg(test)]
@@ -563,5 +639,28 @@ mod tests {
         assert_eq!(watched.len(), 2, "实际: {names:?}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 静止画面必须进 Wait（否则满帧空转，笔记本风扇会响）；
+    /// 演出中要 Poll 才能连续出帧。
+    #[test]
+    fn redraw_after_waits_when_idle() {
+        use winit::event_loop::ControlFlow;
+
+        assert!(matches!(
+            redraw_after(false, false, None),
+            ControlFlow::Wait
+        ));
+        assert!(matches!(redraw_after(true, false, None), ControlFlow::Poll));
+        // 错误页：Wait 但会定时醒来查文件
+        assert!(matches!(
+            redraw_after(false, true, Some(Instant::now())),
+            ControlFlow::WaitUntil(_)
+        ));
+        // 即使错误页，需要重画时也优先出帧
+        assert!(matches!(
+            redraw_after(true, true, Some(Instant::now())),
+            ControlFlow::Poll
+        ));
     }
 }

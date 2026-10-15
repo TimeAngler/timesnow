@@ -141,6 +141,39 @@ fn choice_needs_at_least_one_option() {
     );
 }
 
+/// `@bgm` / `@se` 是 `@play bgm|se` 的简写。
+#[test]
+fn bgm_and_se_shorthands_parse() {
+    let file = parse(":: start\n@bgm main\n@se click\n").unwrap();
+    let steps = &file.blocks["start"];
+    match (&steps[0], &steps[1]) {
+        (
+            Step::Play { channel, name },
+            Step::Play {
+                channel: ch2,
+                name: n2,
+            },
+        ) => {
+            assert_eq!(channel, "bgm");
+            assert_eq!(name, "main");
+            assert_eq!(ch2, "se");
+            assert_eq!(n2, "click");
+        }
+        other => panic!("期望两条 Play，得到 {other:?}"),
+    }
+}
+
+#[test]
+fn bgm_shorthand_needs_a_name() {
+    let err = parse(":: start\n@bgm\n").unwrap_err();
+    assert!(
+        err.message.contains("音频名"),
+        "缺少名字时要提示需要音频名，实际: {}",
+        err.message
+    );
+    assert_eq!(err.line, 2);
+}
+
 /// `>=` / `<=` 以前词法能过、解析必报“暂未支持”。
 #[test]
 fn range_comparisons_parse() {

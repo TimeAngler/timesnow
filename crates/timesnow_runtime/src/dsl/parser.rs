@@ -220,6 +220,24 @@ impl Parser {
                 };
                 out.push(Step::Stop { channel });
             }
+            // @bgm 名字 / @se 名字 是 @play 的简写
+            "bgm" | "se" => {
+                let name = match expect_token(&line.tokens[1..], 0, line, "音频名")? {
+                    Token::Ident(s) => s.clone(),
+                    other => {
+                        return Err(ParseError {
+                            line: line.number,
+                            column: line.indent + 1,
+                            message: format!("@{directive} 期望音频名，得到 {other:?}"),
+                            snippet: line.raw.clone(),
+                        });
+                    }
+                };
+                out.push(Step::Play {
+                    channel: directive.clone(),
+                    name,
+                });
+            }
             other => {
                 return Err(ParseError {
                     line: line.number,
