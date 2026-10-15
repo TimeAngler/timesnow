@@ -125,6 +125,73 @@ fn unknown_directive_is_rejected() {
     assert_eq!(err.line, 2);
 }
 
+/// 打错指令名时要说清楚正确写法是什么，而不是只报"未知指令"。
+/// 这是 `@coice` 打错成 `@choice` 的常见情形。
+#[test]
+fn unknown_directive_suggests_the_nearest_one() {
+    let err = parse(":: start\n@coice\n    甲 -> start\n").unwrap_err();
+    assert!(err.message.contains("未知指令"), "实际: {}", err.message);
+    assert!(
+        err.message.contains("choice"),
+        "应当建议 @choice，实际: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("你是不是想写"),
+        "提示语要像人话，实际: {}",
+        err.message
+    );
+}
+
+/// 完全不沾边的名字不该硬凑一个建议，但要把合法选项列出来
+#[test]
+fn unknown_directive_lists_all_options_when_far_off() {
+    let err = parse(":: start\n@qwrtplkzx\n").unwrap_err();
+    assert!(
+        err.message.contains("可用的指令"),
+        "差太远就该列全部，实际: {}",
+        err.message
+    );
+    for d in ["say", "choice", "jump", "wait"] {
+        assert!(
+            err.message.contains(d),
+            "应当列出 {d}，实际: {}",
+            err.message
+        );
+    }
+}
+
+/// **`DIRECTIVES` 这张表必须和实现同步。**
+///
+/// 它的唯一用途是报错时给建议，所以最糟的情况是"表里有、实现没有"
+/// （建议一个不存在的指令）或"实现有、表里没有"（打错那个名字时给不出建议）。
+/// 这条测试遍历表里的每一项，要求它**不要**被报成"未知指令"。
+#[test]
+fn every_listed_directive_is_actually_implemented() {
+    use crate::dsl::parser::DIRECTIVES;
+
+    for d in DIRECTIVES {
+        // 每个指令都单独起一个剧本；参数给不给都行——
+        // 我们要的是"这条指令被认得"，所以只要错误信息**不是**"未知指令"就算过。
+        let src = format!(":: start\n@{d}\n");
+        match parse(&src) {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.message.contains("未知指令"),
+                "DIRECTIVES 里列了 @{d}，但 parser 不认识它：{}",
+                e.message
+            ),
+        }
+    }
+
+    // 反过来也要防一手：表不能是空的
+    assert!(
+        DIRECTIVES.len() >= 15,
+        "指令表看起来被截断了：{}",
+        DIRECTIVES.len()
+    );
+}
+
 #[test]
 fn bad_indent_is_rejected() {
     let err = parse(":: start\n@say \"a\"\n      @say \"b\"\n").unwrap_err();

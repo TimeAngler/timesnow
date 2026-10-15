@@ -108,11 +108,65 @@ pub fn validate(project_dir: &Path) -> Report {
 
     check_assets(project_dir, &script, &mut diagnostics);
     check_variables(&script, &mut diagnostics);
+    check_unreachable_blocks(&script, &mut diagnostics);
 
     Report {
         diagnostics,
         script: Some(script),
         sources,
+    }
+}
+
+/// 从入口出发走不到的块。
+///
+/// 这是"忘了接上"的典型症状：写完一个结局块，却没有任何 `@jump` 指过去，
+/// 或者块名拼错导致跳转目标悄悄变成了别的东西。**运行时不会报错**——
+/// 剧本整体是合法的，只是那几行永远不会执行。作者只能靠自己发现。
+fn check_unreachable_blocks(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: Vec<&str> = vec![script.start.as_str()];
+
+    while let Some(block) = queue.pop() {
+        if !reached.insert(block) {
+            continue;
+        }
+        let Some(steps) = script.blocks.get(block) else {
+            continue;
+        };
+        for step in steps {
+            match step {
+                Step::Jump { target } => queue.push(target),
+                Step::If {
+                    then, else_block, ..
+                } => {
+                    queue.push(then);
+                    queue.push(else_block);
+                }
+                Step::Choice { options } => {
+                    for o in options {
+                        queue.push(&o.target);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for name in script.blocks.keys() {
+        // 内部块（@if 展开出来的）不是作者写的，别报
+        if name.starts_with("__if_") || reached.contains(name.as_str()) {
+            continue;
+        }
+        out.push(Diagnostic {
+            level: DiagnosticLevel::Warning,
+            location: "script.tsn".into(),
+            message: format!(
+                "块 '{name}' 永远不会被执行：从入口 '{start}' 出发没有任何跳转能到达它\
+                 （忘了 @jump，还是块名拼错了？）",
+                start = script.start
+            ),
+            snippet: None,
+        });
     }
 }
 
@@ -243,10 +297,24 @@ fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnosti
     }
 
     for (kind, name) in missing {
+        // 资源名拼错时给出接近的那个：`leolo212_lak` → `leolo212_lake`。
+        // 只在同类资源里找（背景不会建议一个音效名），而且找不到够近的就把
+        // 这一类全部列出来——资源名字往往很长，光报"不存在"作者很难自查。
+        let candidates: Vec<&str> = match kind.as_str() {
+            "BGM" | "音效" => {
+                let want = if kind == "BGM" { "bgm" } else { "se" };
+                audio_names
+                    .keys()
+                    .filter_map(|k| k.strip_prefix(&format!("{want}/")))
+                    .collect()
+            }
+            _ => sprites.keys().map(|s| s.as_str()).collect(),
+        };
+        let hint = crate::suggest::suggestion_message(&name, candidates, &kind);
         out.push(Diagnostic {
             level: DiagnosticLevel::Warning,
             location: "script.tsn".into(),
-            message: format!("引用了不存在的{kind} '{name}'：assets 里没有同名文件"),
+            message: format!("引用了不存在的{kind} '{name}'：assets 里没有同名文件{hint}"),
             snippet: None,
         });
     }
@@ -277,11 +345,17 @@ fn check_variables(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
         .iter()
         .filter(|n| !assigned.contains(n.as_str()))
     {
+        // 变量名差一个字很难看出来（`好感` / `好敢`），所以给建议。
+        // 候选是"整个剧本出现过的所有变量名"——包括只被读过、
+        // 从没赋值的那些（作者可能两边都打错了，但至少能看到自己写过什么）。
+        let mut candidates: Vec<&str> = assigned.iter().copied().collect();
+        candidates.extend(read_anywhere.iter().map(|s| s.as_str()));
+        let hint = crate::suggest::suggestion_message(name, candidates, "变量");
         out.push(Diagnostic {
             level: DiagnosticLevel::Warning,
             location: "script.tsn".into(),
             message: format!(
-                "变量 '{name}' 在条件里被读取，但整个剧本没有设置过它（条件恒为 false）"
+                "变量 '{name}' 在条件里被读取，但整个剧本没有设置过它（条件恒为 false）{hint}"
             ),
             snippet: None,
         });
@@ -577,6 +651,150 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| d.message.contains("找不到剧本文件"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- "你是不是想写……" ----------
+
+    /// 变量名打错一个字：要指出来接近的那个
+    #[test]
+    fn misspelled_variable_gets_a_suggestion() {
+        let dir = fresh_dir("var_typo");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 好感 = 1\n@if 好敢 >= 1\n    @say \"a\"\n@say \"b\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("好敢")),
+            "应当提示 好敢 没设过：{text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("好感")),
+            "应当建议 好感，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 资源名打错：要建议接近的那个（长名字允许两处笔误）
+    #[test]
+    fn misspelled_asset_gets_a_suggestion() {
+        let dir = fresh_dir("asset_typo");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        std::fs::create_dir_all(dir.join("assets/bg")).unwrap();
+        // 资源扫描只看文件名和扩展名，不读图片内容，所以这里不需要真图
+        std::fs::write(dir.join("assets/bg/leolo212_lake.png"), b"x").unwrap();
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@scene leolo212_lak\n@say \"x\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("leolo212_lak")),
+            "应当报名字不存在：{text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("leolo212_lake")),
+            "应当建议 leolo212_lake，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 一类资源一个都没有时，要把它全部列出来（光说"不存在"没法自查）
+    #[test]
+    fn asset_warning_lists_every_candidate_when_nothing_is_close() {
+        let dir = fresh_dir("asset_far");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        std::fs::create_dir_all(dir.join("assets/bg")).unwrap();
+        std::fs::write(dir.join("assets/bg/village.png"), b"x").unwrap();
+        std::fs::write(dir.join("assets/bg/forest.png"), b"x").unwrap();
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@scene zzzzzzzzzzzz\n@say \"x\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("可用的背景")),
+            "应当列出全部背景，实际：{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|t| t.contains("village") && t.contains("forest")),
+            "两个都要列出来，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- 不可达的块 ----------
+
+    /// 定义了却没人跳过去的块：要报（运行时不会报，作者自己发现不了）
+    #[test]
+    fn unreachable_block_is_warned() {
+        let dir = fresh_dir("unreachable");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@say \"甲\"\n@jump end\n\n:: end\n@say \"乙\"\n\n:: orphan\n@say \"没人来\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter()
+                .any(|t| t.contains("orphan") && t.contains("永远不会")),
+            "应当报 orphan 不可达：{text:?}"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|t| t.contains("'end'") && t.contains("永远不会")),
+            "能到达的块不该被报：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 所有块都可达时不该有任何提示
+    #[test]
+    fn fully_connected_script_has_no_unreachable_warning() {
+        let dir = fresh_dir("all_reachable");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@choice\n    甲 -> a\n    乙 -> b\n\n:: a\n@say \"A\"\n@jump c\n\n:: b\n@jump c\n\n:: c\n@say \"C\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            !text.iter().any(|t| t.contains("永远不会")),
+            "全都可达，不该报：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `@if` 展开出来的内部块不该被当成"不可达"报出去
+    #[test]
+    fn internal_if_blocks_are_not_reported_as_unreachable() {
+        let dir = fresh_dir("internal_blocks");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set flag = true\n@if flag\n    @say \"真\"\n@else\n    @say \"假\"\n@say \"继续\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            !text.iter().any(|t| t.contains("__if_")),
+            "内部块不该出现在报告里：{text:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -132,12 +132,31 @@ fn check_jump_targets(file: &ScriptFile, sources: &Sources) -> Result<(), DslErr
                 }
                 // 指到**写错的那一行**，而不是块定义那一行
                 let (src_file, line, snippet) = reference_location(sources, block_name, step_index);
+
+                // 报错里要说人话：`block_name` 可能是引擎自己生成的
+                // `__if_0_after`（作者从没写过这个块），那就别把它抛给用户。
+                let where_from = if block_name.starts_with("__if_") {
+                    "剧本".to_string()
+                } else {
+                    format!("块 '{block_name}'")
+                };
+
+                // 块名打错是很常见的（`end` → `edn`），所以给个建议。
+                // 候选要**排掉内部块**——建议作者去写 `__if_0_after` 毫无意义。
+                let hint = crate::suggest::suggestion_message(
+                    t,
+                    file.blocks
+                        .keys()
+                        .filter(|k| !k.starts_with("__if_"))
+                        .map(|s| s.as_str()),
+                    "块",
+                );
                 return Err(DslError {
                     file: src_file,
                     line,
                     line_in_expanded: line,
                     column: 1,
-                    message: format!("块 '{block_name}' 引用了不存在的块 '{t}'"),
+                    message: format!("{where_from} 引用了不存在的块 '{t}'{hint}"),
                     snippet,
                     kind: DslErrorKind::UnknownBlock,
                 });

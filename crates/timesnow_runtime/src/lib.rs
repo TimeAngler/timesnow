@@ -5,6 +5,7 @@ pub mod dsl;
 pub mod program;
 pub mod saves;
 pub mod script;
+pub mod suggest;
 pub mod validate;
 
 #[cfg(test)]

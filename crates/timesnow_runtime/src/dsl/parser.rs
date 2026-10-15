@@ -1,7 +1,38 @@
 use super::error::ParseError;
 use super::lexer::{Line, Token, lex_file};
 use crate::script::{ArithOp, ChoiceOption, Cond, Expr, ScriptFile, Step, Value};
+use crate::suggest::suggestion_message;
 use std::collections::HashMap;
+
+/// 所有合法的 `@指令`。
+///
+/// 这份列表的唯一用途是**报错时给建议**（"未知指令 @coice，你是不是想写
+/// `@choice`？"）。以前它只活在下面 `match` 的各个 arm 上，作者打错字时
+/// 引擎知道不对，却说不出对的是什么。
+///
+/// **加新指令时要同时更新这里**——有测试盯着（`every_directive_is_listed`）。
+pub const DIRECTIVES: &[&str] = &[
+    "say",
+    "jump",
+    "scene",
+    "show",
+    "hide",
+    "clear",
+    "set",
+    "if",
+    "choice",
+    "wait",
+    "fade",
+    "chapter",
+    "play",
+    "stop",
+    "bgm",
+    "se",
+    "quit",
+    "exit",
+    "title",
+    "return_to_title",
+];
 
 pub fn parse(input: &str) -> Result<ScriptFile, ParseError> {
     let lines = lex_file(input)?;
@@ -262,10 +293,11 @@ impl Parser {
                 });
             }
             other => {
+                let hint = suggestion_message(other, DIRECTIVES.iter().copied(), "指令");
                 return Err(ParseError {
                     line: line.number,
                     column: line.indent + 2,
-                    message: format!("未知指令 @{other}"),
+                    message: format!("未知指令 @{other}{hint}"),
                     snippet: line.raw.clone(),
                 });
             }
