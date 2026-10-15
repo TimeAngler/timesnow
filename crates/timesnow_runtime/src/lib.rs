@@ -9,6 +9,7 @@ pub mod suggest;
 pub mod validate;
 pub mod vm;
 
+pub mod tween;
 #[cfg(test)]
 mod vm_tests;
 

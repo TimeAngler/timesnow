@@ -4,10 +4,12 @@
 @play bgm atlasaudio_kalimba
 @say "——《电话》——"
 @say "一个你不想打的电话。"
+@wait 0.5
 @choice
-    开始 -> start
+    开始 -> prologue
     退出 -> quit
 
 :: quit
 @say "下次再打吧。"
-@fade to 0.0 1.0
+@fade to 0.0 1.5
+@quit

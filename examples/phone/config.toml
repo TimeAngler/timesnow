@@ -6,7 +6,7 @@ height = 720
 [textbox]
 x = 0.05
 y = 0.72
-w = 0.90
+w = 0.9
 h = 0.22
 
 [text]
@@ -15,32 +15,37 @@ line_height = 54.0
 scale = 1.0
 x = 0.08
 y = 0.78
-color = [255, 255, 255]
-# 每个字间隔秒数
+color = [
+    255,
+    255,
+    255,
+]
 speed = 0.03
-
 name_x = 0.08
 name_y = 0.73
 name_scale = 1.1
-name_color = [255, 220, 180]
+name_color = [
+    255,
+    220,
+    180,
+]
 
 [choice]
-x = 0.20
-w = 0.60
+x = 0.2
+w = 0.6
 h = 0.08
 gap = 0.02
-# 选项组整体的垂直中心，0.5 = 屏幕正中
 y_center = 0.5
-# 文字相对选项框的横向偏移
 text_pad_x = 0.05
-# 文字相对选项框的纵向偏移
-text_pad_y = 0.30
-color = [220, 220, 220]
+text_pad_y = 0.3
+color = [
+    220,
+    220,
+    220,
+]
 
-# 音量：0.0 ~ 1.0。游戏里按 Esc 或 O 打开设置界面调，
-# 调完会自动写回这个文件。
 [audio]
-master = 0.8
+master = 1.0
 bgm = 0.7
 se = 0.9
 muted = false
