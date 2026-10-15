@@ -1,0 +1,41 @@
+(
+    version: 2,
+    script_fingerprint: 10227722150514851958,
+    current_block: "ch4",
+    current_step: 12,
+    step_text: Some("你怎么现在才知道找我？"),
+    vars: {
+        "好感": 10,
+        "打过电话": true,
+        "名字": "阿德里安",
+        "信任": 0.75,
+    },
+    stage: (
+        background: Some("lake"),
+        characters: [
+            ("alice", (
+                x: 0.55,
+                y: 0.1,
+                w: 0.4,
+                h: 0.85,
+            )),
+        ],
+    ),
+    bgm: Some("main"),
+    last_say: Some((Some("小雪"), "你怎么现在才知道找我？")),
+    pending_choices: Some([
+        "打招呼",
+        "沉默",
+    ]),
+    chapter: Some("第四章 · 湖边"),
+    backlog: [
+        (
+            speaker: None,
+            text: "我坐在窗边。",
+        ),
+        (
+            speaker: Some("小雪"),
+            text: "你怎么现在才知道找我？",
+        ),
+    ],
+)

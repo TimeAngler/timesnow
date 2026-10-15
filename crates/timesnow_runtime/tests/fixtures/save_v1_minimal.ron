@@ -1,0 +1,19 @@
+(
+    current_block: "title",
+    current_step: 3,
+    vars: {
+        "打过电话": Bool(true),
+        "好感": Int(10),
+    },
+    stage: (
+        background: Some("lake"),
+        characters: [
+            ("alice", (
+                x: 0.55,
+                y: 0.1,
+                w: 0.4,
+                h: 0.85,
+            )),
+        ],
+    ),
+)

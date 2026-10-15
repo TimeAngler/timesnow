@@ -44,13 +44,77 @@ pub struct Stage {
     pub characters: Vec<(String, StageRect)>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(untagged)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
     Str(String),
+}
+
+/// **`Value` 要同时读得懂两种历史形态。**
+///
+/// 序列化一侧是 untagged 的——存进存档就是 `好感: 10`，干净。
+/// 但**最初的存档格式是带 tag 的**：`好感: Int(10)` / `Bool(true)`。
+/// 后来改成 untagged 时，老存档就全读不出来了（`data did not match any
+/// variant of untagged enum Value`）——这个回归是被 `tests/save_compat.rs`
+/// 里的金标准夹具抓到的，玩家手里的档比这更早。
+///
+/// 所以这里手写反序列化：**先试带 tag 的老形态，再试 untagged 的新形态**。
+/// 只影响读取，写出去的仍然是新格式。
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        /// 老格式的映射形式：`Int(10)` 在 RON 里是 `Int` 到 10 的单键映射
+        #[derive(Deserialize)]
+        enum Legacy {
+            Bool(bool),
+            Int(i64),
+            Float(f64),
+            Str(String),
+        }
+
+        /// 新格式的标量形式。`f64` 要排在 `i64` 前面——
+        /// 虽然匹配到就终止，但这样读整数时不会被 f64 先截走精度。
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Plain {
+            Bool(bool),
+            Float(f64),
+            Int(i64),
+            Str(String),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Legacy(Legacy),
+            Plain(Plain),
+        }
+
+        match Either::deserialize(d).map_err(D::Error::custom)? {
+            Either::Legacy(Legacy::Bool(b)) => Ok(Value::Bool(b)),
+            Either::Legacy(Legacy::Int(n)) => Ok(Value::Int(n)),
+            Either::Legacy(Legacy::Float(x)) => Ok(Value::Float(x)),
+            Either::Legacy(Legacy::Str(s)) => Ok(Value::Str(s)),
+            Either::Plain(Plain::Bool(b)) => Ok(Value::Bool(b)),
+            // 2.0 这种带小数的会落到 f64；整数值的浮点会落到 i64。
+            // 这正是当前 `@set` 的语义（写 3.0 得到整数 3）。
+            Either::Plain(Plain::Float(x)) => {
+                Ok(if x.fract() == 0.0 && x.abs() < 9.007_199_254_740_992e15 {
+                    Value::Int(x as i64)
+                } else {
+                    Value::Float(x)
+                })
+            }
+            Either::Plain(Plain::Int(n)) => Ok(Value::Int(n)),
+            Either::Plain(Plain::Str(s)) => Ok(Value::Str(s)),
+        }
+    }
 }
 
 impl std::fmt::Display for Value {

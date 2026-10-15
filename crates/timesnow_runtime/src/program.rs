@@ -63,7 +63,7 @@ pub type ChoiceTexts = Vec<String>;
 ///
 /// 比 v1 多了：版本号、剧本指纹、当前位置那句台词（用来在剧本改动后重新定位）、
 /// 正在播的 BGM、最后一句显示过的台词。
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SaveData {
     /// 存档格式版本。老存档没有这个字段，按 v1 处理（那时只有 4 个字段）。
     #[serde(default = "legacy_version")]
