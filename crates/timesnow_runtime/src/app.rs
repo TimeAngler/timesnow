@@ -1161,6 +1161,13 @@ impl ApplicationHandler for App {
                 // 剧本挂起的控制指令（@quit / @title）。
                 // 放在音频事件之后：`@title` 自己会推一条 StopBgm，
                 // 那条也得先被处理掉。
+                if let Some(err) = script.take_error() {
+                    // @set 求值失败之类：剧本照常往下走，但作者得知道。
+                    // 以后要做"屏幕上的运行期警告"就接在这里。
+                    eprintln!("剧本运行提示: {err}");
+                    self.toast = Some((err, Instant::now()));
+                }
+
                 if let Some(control) = script.take_control() {
                     match control {
                         Control::Quit => {

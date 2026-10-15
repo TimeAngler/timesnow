@@ -254,19 +254,29 @@ fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnosti
 
 /// 用了没设过的变量：`@if flag` 但全剧没有 `@set flag`。
 /// 这是"分支永远走不到"最常见的原因，所以给一条提示。
+///
+/// 也会查 `@set` 右边的表达式：`@set 好感 = 好感 + 1` 里如果
+/// `好感` 从来没被赋过值，运行期会报"变量还没有值"，
+/// 这里提前告诉作者。
 fn check_variables(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
+    // ① 条件里读的变量：仍然用"整个剧本有没有赋过值"这个粗判。
+    //    条件分散在分支里，第一次赋值可能在任何一条路径上，
+    //    按顺序判会误报，所以这里只抓"从来没出现过"。
     let assigned = assigned_vars(script);
-    let mut read: BTreeSet<&str> = BTreeSet::new();
+    let mut read_anywhere: BTreeSet<String> = BTreeSet::new();
 
     for steps in script.blocks.values() {
         for step in steps {
             if let Step::If { cond, .. } = step {
-                collect_cond_vars(cond, &mut read);
+                collect_cond_vars(cond, &mut read_anywhere);
             }
         }
     }
 
-    for name in read.difference(&assigned) {
+    for name in read_anywhere
+        .iter()
+        .filter(|n| !assigned.contains(n.as_str()))
+    {
         out.push(Diagnostic {
             level: DiagnosticLevel::Warning,
             location: "script.tsn".into(),
@@ -275,6 +285,83 @@ fn check_variables(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
             ),
             snippet: None,
         });
+    }
+
+    // ② `@set` 右边的表达式：这个必须**按执行顺序**判。
+    //    因为 `@set x = x + 1` 自己就把 x 算成"赋值过"，
+    //    只看集合永远抓不到"x 其实还没值"。
+    //    从起始块线性走一遍，遇到读之前没赋过值的就报。
+    check_expression_order(script, out);
+}
+
+/// 从 `start` 块按顺序走，检查 `@set` 右边引用的变量在那一刻有没有值。
+///
+/// 这是**近似的**数据流检查：只沿一条线走，`@jump` 之后的块不再往下跟。
+/// 目标是抓"作者忘了初始化"这种最常见的错，而不是做完整的可达性分析。
+fn check_expression_order(script: &ScriptFile, out: &mut Vec<Diagnostic>) {
+    const MAX_STEPS: usize = 10_000;
+
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    let mut reported: BTreeSet<String> = BTreeSet::new();
+    let mut block = script.start.clone();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut steps_taken = 0usize;
+
+    loop {
+        // 走到走过的块就停：脚本可能有环，也可能互相跳
+        if !visited.insert(block.clone()) {
+            break;
+        }
+        let Some(steps) = script.blocks.get(&block) else {
+            break;
+        };
+
+        for step in steps {
+            steps_taken += 1;
+            if steps_taken > MAX_STEPS {
+                return;
+            }
+
+            match step {
+                Step::Set { name, value } => {
+                    let mut names = Vec::new();
+                    value.referenced_vars(&mut names);
+                    for n in names {
+                        if !known.contains(&n) && reported.insert(n.clone()) {
+                            out.push(Diagnostic {
+                                level: DiagnosticLevel::Warning,
+                                location: "script.tsn".into(),
+                                message: format!(
+                                    "`@set {name} = …` 里用到了 '{n}'，但在这之前它还没有值\
+                                     （运行到这里会跳过这次赋值）"
+                                ),
+                                snippet: None,
+                            });
+                        }
+                    }
+                    known.insert(name.clone());
+                }
+                Step::Choice { options } => {
+                    // 选项携带的赋值也算"给过值"
+                    for o in options {
+                        for k in o.set.keys() {
+                            known.insert(k.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 沿线性出口继续：@jump 优先，否则块尾就是尽头
+        let jump = steps.iter().rev().find_map(|s| match s {
+            Step::Jump { target } => Some(target.clone()),
+            _ => None,
+        });
+        match jump {
+            Some(target) => block = target,
+            None => break,
+        }
     }
 }
 
@@ -301,7 +388,7 @@ fn assigned_vars(script: &ScriptFile) -> BTreeSet<&str> {
     assigned
 }
 
-fn collect_cond_vars<'a>(cond: &'a Cond, out: &mut BTreeSet<&'a str>) {
+fn collect_cond_vars(cond: &Cond, out: &mut BTreeSet<String>) {
     match cond {
         Cond::Eq { name, .. }
         | Cond::Ne { name, .. }
@@ -310,7 +397,7 @@ fn collect_cond_vars<'a>(cond: &'a Cond, out: &mut BTreeSet<&'a str>) {
         | Cond::Ge { name, .. }
         | Cond::Le { name, .. }
         | Cond::Truthy { name } => {
-            out.insert(name);
+            out.insert(name.clone());
         }
         Cond::Not(inner) => collect_cond_vars(inner, out),
         Cond::And(list) | Cond::Or(list) => {
@@ -374,6 +461,64 @@ mod tests {
         );
         let report = validate(&dir);
         assert!(report.diagnostics.is_empty(), "{:?}", summary(&report));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `@set` 右边引用了从没赋过值的变量：`--check` 要提前提醒。
+    /// 不然要等跑到那儿才在运行期报"变量还没有值"。
+    #[test]
+    fn expression_reading_an_unset_variable_is_warned() {
+        let dir = fresh_dir("unset_in_expr");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 好感 = 好感 + 1\n@say \"x\"\n",
+        );
+        let report = validate(&dir);
+        let text = summary(&report);
+        assert!(
+            text.iter().any(|t| t.contains("好感")),
+            "应当提示“好感”被读了但没设过：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 反过来：写过一次之后再自增，不该误报
+    #[test]
+    fn self_increment_after_an_assignment_is_not_warned() {
+        let dir = fresh_dir("self_inc_ok");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 好感 = 0\n@set 好感 = 好感 + 1\n@say \"x\"\n",
+        );
+        let report = validate(&dir);
+        assert!(
+            report.diagnostics.is_empty(),
+            "先赋值再自增是正常写法，不该有提示：{:?}",
+            summary(&report)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 浮点条件不该再被当成错误（以前会报"浮点数暂未支持"）
+    #[test]
+    fn float_conditions_are_accepted() {
+        let dir = fresh_dir("float_cond");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@set 信任 = 0.5\n@if 信任 >= 0.5\n    @say \"好\"\n@else\n    @say \"不好\"\n",
+        );
+        let report = validate(&dir);
+        assert!(
+            report.diagnostics.is_empty(),
+            "浮点比较应当合法：{:?}",
+            summary(&report)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

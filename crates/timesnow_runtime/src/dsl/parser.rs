@@ -1,6 +1,6 @@
 use super::error::ParseError;
 use super::lexer::{Line, Token, lex_file};
-use crate::script::{ChoiceOption, Cond, ScriptFile, Step, Value};
+use crate::script::{ArithOp, ChoiceOption, Cond, Expr, ScriptFile, Step, Value};
 use std::collections::HashMap;
 
 pub fn parse(input: &str) -> Result<ScriptFile, ParseError> {
@@ -498,8 +498,140 @@ fn parse_set(tokens: &[Token], line: &Line) -> Result<Step, ParseError> {
         }
     }
 
-    let value = parse_value(tokens.get(2), line)?;
+    let value = parse_expr(&tokens[2..], line)?;
     Ok(Step::Set { name, value })
+}
+
+// ---------- 算术表达式 ----------
+//
+// 优先级从低到高：加减 → 乘除取余 → 一元负号 → 括号/字面量/变量。
+// 递归下降，写起来直白，出错信息也好带上整行。
+
+/// `@set 名字 = <表达式>` 的右边
+fn parse_expr(tokens: &[Token], line: &Line) -> Result<Expr, ParseError> {
+    let mut pos = 0;
+    let expr = parse_add(tokens, &mut pos, line)?;
+
+    if pos < tokens.len() {
+        return Err(expr_error(
+            line,
+            format!("@set 的表达式后面还有多余的内容：{:?}", &tokens[pos..]),
+        ));
+    }
+    Ok(expr)
+}
+
+/// 加、减
+fn parse_add(tokens: &[Token], pos: &mut usize, line: &Line) -> Result<Expr, ParseError> {
+    let mut lhs = parse_mul(tokens, pos, line)?;
+
+    while let Some(op) = tokens.get(*pos) {
+        let arith = match op {
+            Token::Plus => ArithOp::Add,
+            Token::Minus => ArithOp::Sub,
+            _ => break,
+        };
+        *pos += 1;
+        let rhs = parse_mul(tokens, pos, line)?;
+        lhs = Expr::Binary {
+            op: arith,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+    }
+    Ok(lhs)
+}
+
+/// 乘、除、取余
+fn parse_mul(tokens: &[Token], pos: &mut usize, line: &Line) -> Result<Expr, ParseError> {
+    let mut lhs = parse_unary(tokens, pos, line)?;
+
+    while let Some(op) = tokens.get(*pos) {
+        let arith = match op {
+            Token::Star => ArithOp::Mul,
+            Token::Slash => ArithOp::Div,
+            Token::Percent => ArithOp::Rem,
+            _ => break,
+        };
+        *pos += 1;
+        let rhs = parse_unary(tokens, pos, line)?;
+        lhs = Expr::Binary {
+            op: arith,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+    }
+    Ok(lhs)
+}
+
+/// 一元负号。`-x` 就是 `Neg(x)`；`- -x` 也认（虽然没人这么写）。
+fn parse_unary(tokens: &[Token], pos: &mut usize, line: &Line) -> Result<Expr, ParseError> {
+    if let Some(Token::Minus) = tokens.get(*pos) {
+        *pos += 1;
+        let inner = parse_unary(tokens, pos, line)?;
+        return Ok(Expr::Neg(Box::new(inner)));
+    }
+    parse_atom(tokens, pos, line)
+}
+
+/// 括号、字面量、变量
+fn parse_atom(tokens: &[Token], pos: &mut usize, line: &Line) -> Result<Expr, ParseError> {
+    let Some(token) = tokens.get(*pos).cloned() else {
+        return Err(expr_error(line, "@set 的右边需要一个值或变量名".into()));
+    };
+
+    match token {
+        Token::LParen => {
+            *pos += 1;
+            let inner = parse_add(tokens, pos, line)?;
+            match tokens.get(*pos) {
+                Some(Token::RParen) => {
+                    *pos += 1;
+                    Ok(inner)
+                }
+                _ => Err(expr_error(line, "括号没有闭合，少了一个 `)`".into())),
+            }
+        }
+        Token::Float(n) => {
+            *pos += 1;
+            Ok(Expr::Literal(int_or_float(n)))
+        }
+        Token::Str(s) => {
+            *pos += 1;
+            Ok(Expr::Literal(Value::Str(s)))
+        }
+        Token::Ident(name) => {
+            *pos += 1;
+            match name.as_str() {
+                "true" => Ok(Expr::Literal(Value::Bool(true))),
+                "false" => Ok(Expr::Literal(Value::Bool(false))),
+                _ => Ok(Expr::Var(name)),
+            }
+        }
+        other => Err(expr_error(line, format!("@set 的右边不认识 {other:?}"))),
+    }
+}
+
+/// 字面量统一按 f64 解析（lexer 就是这么做的）：没有小数部分就当整数。
+///
+/// 这样 `@set n = 1` 出来的是 `Value::Int`（不会变成 `1.0`），
+/// 而 `@set f = 1.5` 是 `Value::Float`。
+fn int_or_float(n: f64) -> Value {
+    #[allow(clippy::cast_precision_loss)]
+    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
+        Value::Int(n as i64)
+    } else {
+        Value::Float(n)
+    }
+}
+
+fn expr_error(line: &Line, message: String) -> ParseError {
+    ParseError {
+        line: line.number,
+        column: line.indent + 1,
+        message,
+        snippet: line.raw.clone(),
+    }
 }
 
 fn parse_choice_option(line: &Line) -> Result<ChoiceOption, ParseError> {
@@ -761,18 +893,10 @@ fn parse_float(tokens: &[Token], i: usize, line: &Line) -> Result<f64, ParseErro
 
 fn parse_value(token: Option<&Token>, line: &Line) -> Result<Value, ParseError> {
     match token {
-        Some(Token::Float(n)) => {
-            if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
-                Ok(Value::Int(*n as i64))
-            } else {
-                Err(ParseError {
-                    line: line.number,
-                    column: line.indent + 1,
-                    message: "浮点数暂未支持，请用整数".into(),
-                    snippet: line.raw.clone(),
-                })
-            }
-        }
+        // 字面量：整数值的写成 Int，带小数的写成 Float。
+        // 以前这里直接拒绝浮点（"浮点数暂未支持，请用整数"），
+        // 导致 `@if 好感 < 5.5` 这种条件写不出来。
+        Some(Token::Float(n)) => Ok(int_or_float(*n)),
         Some(Token::Str(s)) => Ok(Value::Str(s.clone())),
         Some(Token::Ident(s)) => match s.as_str() {
             "true" => Ok(Value::Bool(true)),

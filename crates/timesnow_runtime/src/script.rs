@@ -44,11 +44,12 @@ pub struct Stage {
     pub characters: Vec<(String, StageRect)>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum Value {
     Bool(bool),
     Int(i64),
+    Float(f64),
     Str(String),
 }
 
@@ -57,7 +58,189 @@ impl std::fmt::Display for Value {
         match self {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(n) => write!(f, "{n}"),
+            Value::Float(x) => write!(f, "{}", format_float(*x)),
             Value::Str(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// 浮点数怎么写进台词。
+///
+/// 直接 `{}` 输出 `f64` 会得到 `1.2000000000000002` 这种，写进对话里很难看；
+/// 但也不能粗暴地只留两位——`0.005` 会变成 `0.01`。
+/// 折中：先按最短往返表示试（`1.2` → "1.2"），超过 6 位小数才截断。
+fn format_float(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "∞".into() } else { "-∞".into() };
+    }
+    // 整数值的浮点去掉小数点：3.0 → "3"（作者写 @set f = 3.0 时不会看到 "3.0"）
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        return format!("{}", x as i64);
+    }
+    let full = format!("{x}");
+    let decimals = full.split('.').nth(1).map(|s| s.len()).unwrap_or(0);
+    if decimals <= 6 {
+        full
+    } else {
+        // 截断到 6 位再收尾，避免 "0.300000" 这种尾巴
+        let mut s = format!("{x:.6}");
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        s
+    }
+}
+
+impl Value {
+    /// 能不能当数字用
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    /// 是不是数字（整数或浮点）
+    pub fn is_number(&self) -> bool {
+        self.as_number().is_some()
+    }
+
+    /// 这个值是什么类型（报错信息用）
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Bool(_) => "布尔",
+            Value::Int(_) => "整数",
+            Value::Float(_) => "浮点数",
+            Value::Str(_) => "字符串",
+        }
+    }
+
+    /// 运算结果：两个整数就用整数（`2 * 3` 不该变成 `6.0`），
+    /// 只要沾了浮点就变浮点。
+    fn number_result(lhs: &Value, rhs: &Value, raw: f64) -> Value {
+        if matches!(lhs, Value::Int(_)) && matches!(rhs, Value::Int(_)) {
+            // 整数域内的结果尽量留整数；溢出/非整（除法）才退成浮点
+            #[allow(clippy::cast_precision_loss)]
+            if raw.fract() == 0.0 && raw.abs() < 9.007_199_254_740_992e15 {
+                return Value::Int(raw as i64);
+            }
+        }
+        Value::Float(raw)
+    }
+
+    /// 算术：只有数字之间能做，字符串/布尔会返回 `Err`
+    pub fn arithmetic(&self, op: ArithOp, other: &Value) -> Result<Value, String> {
+        let (Some(a), Some(b)) = (self.as_number(), other.as_number()) else {
+            return Err(format!(
+                "{} 不能和 {} 做运算",
+                self.type_name(),
+                other.type_name()
+            ));
+        };
+        let raw = match op {
+            ArithOp::Add => a + b,
+            ArithOp::Sub => a - b,
+            ArithOp::Mul => a * b,
+            ArithOp::Div => {
+                if b == 0.0 {
+                    return Err("不能除以 0".into());
+                }
+                a / b
+            }
+            ArithOp::Rem => {
+                if b == 0.0 {
+                    return Err("不能对 0 取余".into());
+                }
+                a % b
+            }
+        };
+        Ok(Self::number_result(self, other, raw))
+    }
+}
+
+/// 算术运算符
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl ArithOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Rem => "%",
+        }
+    }
+}
+
+/// `@set` 的右边：一个可以引用变量的算术表达式。
+///
+/// 以前这里只能放字面量，`@set 好感 = 好感 + 1` 写不出来。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum Expr {
+    Literal(Value),
+    Var(String),
+    Neg(Box<Expr>),
+    Binary {
+        op: ArithOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+}
+
+impl Expr {
+    /// 求值。出错（未定义变量 / 类型不对 / 除以 0）时返回人话说明。
+    ///
+    /// 除法不用 `checked_div` 那一套：除数是浮点，`== 0.0` 判断就够，
+    /// 而且这里不追求 IEEE 那套 inf/nan 语义——作者写剧本时想要的是
+    /// "算不出来就告诉我"，不是安静地得到一个 inf。
+    pub fn eval(&self, vars: &HashMap<String, Value>) -> Result<Value, String> {
+        match self {
+            Expr::Literal(v) => Ok(v.clone()),
+            Expr::Var(name) => vars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("变量 `{name}` 还没有值")),
+            Expr::Neg(inner) => {
+                let v = inner.eval(vars)?;
+                match v {
+                    Value::Int(n) => Ok(Value::Int(-n)),
+                    Value::Float(x) => Ok(Value::Float(-x)),
+                    other => Err(format!("{} 不能取负", other.type_name())),
+                }
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let a = lhs.eval(vars)?;
+                let b = rhs.eval(vars)?;
+                a.arithmetic(*op, &b)
+            }
+        }
+    }
+
+    /// 表达式里引用到的变量名（给 `@check` 做"变量用了但没设过"的检查）
+    pub fn referenced_vars(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Literal(_) => {}
+            Expr::Var(name) => out.push(name.clone()),
+            Expr::Neg(inner) => inner.referenced_vars(out),
+            Expr::Binary { lhs, rhs, .. } => {
+                lhs.referenced_vars(out);
+                rhs.referenced_vars(out);
+            }
         }
     }
 }
@@ -98,7 +281,8 @@ pub enum Step {
     },
     Set {
         name: String,
-        value: Value,
+        /// 右边可以是一个表达式（`好感 + 1`），也可以只是字面量
+        value: Expr,
     },
     If {
         cond: Cond,
@@ -261,6 +445,9 @@ pub struct Vm {
     chapter: Option<String>,
     /// 剧本挂起的控制指令（`@quit` / `@title`），由 `Script` 取走转交 `App`
     pending_control: Option<Control>,
+    /// 运行期出问题的地方（比如 `@set` 求值失败）。
+    /// 不中断剧本，只挂起来让上层提示作者。
+    pending_error: Option<String>,
 }
 
 impl Vm {
@@ -278,7 +465,13 @@ impl Vm {
             backlog: Vec::new(),
             chapter: None,
             pending_control: None,
+            pending_error: None,
         }
+    }
+
+    /// 取走运行期错误（`@set` 求值失败之类）。取一次就没了。
+    pub fn take_error(&mut self) -> Option<String> {
+        self.pending_error.take()
     }
 
     /// 取走"要立刻生效的 alpha"（瞬时 `@fade` 留下的）
@@ -415,7 +608,17 @@ impl Vm {
                     }
                 }
                 Step::Set { name, value } => {
-                    self.vars.insert(name, value);
+                    // 求值失败（未定义变量 / 类型不对 / 除以 0）：
+                    // **不赋值，也不中断剧本**——把问题挂起来让 App 提示作者，
+                    // 游戏继续跑。变量保持原样，总比悄悄变成错的值好。
+                    match value.eval(&self.vars) {
+                        Ok(v) => {
+                            self.vars.insert(name, v);
+                        }
+                        Err(e) => {
+                            self.pending_error = Some(format!("@set {name}：{e}"));
+                        }
+                    }
                     self.step += 1;
                 }
                 Step::Scene { background } => {
@@ -546,29 +749,31 @@ impl Vm {
 
     fn eval_cond(&self, cond: &Cond) -> bool {
         match cond {
+            // `==` / `!=` 走值相等：整数 1 和浮点 1.0 是**不同**的值。
+            // 想要数值比较请用 `>=` / `<=`（它们按数值来）。
             Cond::Eq { name, value } => self.vars.get(name) == Some(value),
             Cond::Ne { name, value } => self.vars.get(name) != Some(value),
-            Cond::Gt { name, value } => match (self.vars.get(name), value) {
-                (Some(Value::Int(n)), Value::Int(v)) => *n > *v,
-                _ => false,
-            },
-            Cond::Lt { name, value } => match (self.vars.get(name), value) {
-                (Some(Value::Int(n)), Value::Int(v)) => *n < *v,
-                _ => false,
-            },
-            Cond::Ge { name, value } => match (self.vars.get(name), value) {
-                (Some(Value::Int(n)), Value::Int(v)) => *n >= *v,
-                _ => false,
-            },
-            Cond::Le { name, value } => match (self.vars.get(name), value) {
-                (Some(Value::Int(n)), Value::Int(v)) => *n <= *v,
-                _ => false,
-            },
+            // 大小比较按数值来：整数变量和浮点字面量混着比也对，
+            // 所以 `@if 好感 >= 5` 在好感是 5.0 时成立。
+            Cond::Gt { name, value } => self.numeric_cmp(name, value).is_some_and(|o| o.is_gt()),
+            Cond::Lt { name, value } => self.numeric_cmp(name, value).is_some_and(|o| o.is_lt()),
+            Cond::Ge { name, value } => self.numeric_cmp(name, value).is_some_and(|o| o.is_ge()),
+            Cond::Le { name, value } => self.numeric_cmp(name, value).is_some_and(|o| o.is_le()),
             Cond::Truthy { name } => matches!(self.vars.get(name), Some(Value::Bool(true))),
             Cond::Not(inner) => !self.eval_cond(inner),
             Cond::And(list) => list.iter().all(|c| self.eval_cond(c)),
             Cond::Or(list) => list.iter().any(|c| self.eval_cond(c)),
         }
+    }
+
+    /// 变量和字面量都当数字比。有一边不是数字就比不了（返回 None）。
+    ///
+    /// NaN 会得到 None（`partial_cmp` 的结果），所以 `@if x > 0` 在 x 是 NaN
+    /// 时是 false 而不是 true——这是想要的行为。
+    fn numeric_cmp(&self, name: &str, value: &Value) -> Option<std::cmp::Ordering> {
+        let a = self.vars.get(name)?.as_number()?;
+        let b = value.as_number()?;
+        a.partial_cmp(&b)
     }
 
     /// 把 `"你好 {name}"` 里的 `{name}` 换成变量值。
@@ -688,6 +893,14 @@ impl Script {
     /// 取走剧本挂起的控制指令（`@quit` / `@title`）
     pub fn take_control(&mut self) -> Option<Control> {
         self.vm.take_control()
+    }
+
+    /// 取走运行期错误（`@set` 求值失败之类）。
+    ///
+    /// 为什么不让 `Vm` 直接打印：`Vm` 是纯逻辑，没有"输出"这个概念；
+    /// 打印/上屏由上层决定。现在 `App` 会写进控制台。
+    pub fn take_error(&mut self) -> Option<String> {
+        self.vm.take_error()
     }
 
     /// 回到标题画面：从磁盘重新读一遍剧本，整份状态从头来。

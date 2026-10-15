@@ -21,9 +21,14 @@ pub enum Token {
     LBrace,
     RBrace, // { }
     LParen,
-    RParen, // ( )
-    Comma,  // ,
-    Colon,  // :   （用在 @if ... : ... 里，或将来扩展）
+    RParen,  // ( )
+    Comma,   // ,
+    Colon,   // :   （用在 @if ... : ... 里，或将来扩展）
+    Plus,    // +
+    Minus,   // -   （-> 已经在前面被识别掉了）
+    Star,    // *
+    Slash,   // /
+    Percent, // %
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +205,33 @@ fn lex_line(raw: &str, line_number: usize) -> Result<Vec<Token>, ParseError> {
                 tokens.push(Token::Lt);
                 pos += 1;
             }
+            continue;
+        }
+
+        // 算术语义符。注意 `->` 必须在 `-` 之前判断（上面已经处理过）。
+        if c == '+' {
+            tokens.push(Token::Plus);
+            pos += 1;
+            continue;
+        }
+        if c == '-' {
+            tokens.push(Token::Minus);
+            pos += 1;
+            continue;
+        }
+        if c == '*' {
+            tokens.push(Token::Star);
+            pos += 1;
+            continue;
+        }
+        if c == '/' {
+            tokens.push(Token::Slash);
+            pos += 1;
+            continue;
+        }
+        if c == '%' {
+            tokens.push(Token::Percent);
+            pos += 1;
             continue;
         }
 

@@ -24,6 +24,15 @@ fn fresh_vm(src: &str) -> Vm {
     Vm::new(program)
 }
 
+/// 当前停在 Say 上时那句话（变量已展开）。
+/// `Script` 有 `current_full_text()`，`Vm` 没有，测试里就地拼一个。
+fn say_text(machine: &Vm) -> Option<String> {
+    match machine.current_step() {
+        Some(Step::Say { text, .. }) => Some(machine.expand_text(text)),
+        _ => None,
+    }
+}
+
 // ---------- 位置推进 ----------
 
 #[test]
@@ -58,6 +67,247 @@ fn set_if_and_jump_are_skipped_without_stopping() {
     let mut vm = vm(src);
     assert_eq!(vm.run_until_blocked(), Outcome::WaitingInput);
     assert_eq!(vm.vars().get("score"), Some(&Value::Int(10)));
+}
+
+/// 超过 6 位小数才截断，而且要顺手去掉尾巴上的 0；
+/// `1/3*3` 这种常见写法不该在台词里显示成 1.0000000000000002
+#[test]
+fn long_floats_are_displayed_readably() {
+    let third = Value::Float(1.0 / 3.0).to_string();
+    assert!(
+        third.len() <= 8 && !third.ends_with('0'),
+        "长小数应当截断且不留尾零，实际 {third}"
+    );
+
+    let nearly_one = (1.0f64 / 3.0) * 3.0;
+    assert!(
+        (nearly_one - 1.0).abs() < f64::EPSILON * 4.0,
+        "1/3*3 在 f64 下应当非常接近 1"
+    );
+    assert_eq!(
+        Value::Float(nearly_one).to_string(),
+        "1",
+        "显示时要收成 1，而不是 1.0000000000000002"
+    );
+}
+
+/// `@set` 现在能写算术表达式了。
+///
+/// 以前这里只能放字面量，`@set 好感 = 好感 + 1` 写不出来——这是 DSL
+/// 最硬的一条约束。现在支持 `+ - * / %`、括号、一元负号，右边可以引用变量。
+#[test]
+fn set_supports_arithmetic_expressions() {
+    // (源码, 变量名, 期望值)
+    let cases: &[(&str, &str, Value)] = &[
+        ("@set n = 1 + 2", "n", Value::Int(3)),
+        ("@set n = 10 - 3", "n", Value::Int(7)),
+        ("@set n = 4 * 5", "n", Value::Int(20)),
+        ("@set n = 7 / 2", "n", Value::Float(3.5)),
+        ("@set n = 8 / 2", "n", Value::Int(4)),
+        ("@set n = 7 % 3", "n", Value::Int(1)),
+        // 优先级：乘法先算
+        ("@set n = 2 + 3 * 4", "n", Value::Int(14)),
+        // 括号改优先级
+        ("@set n = (2 + 3) * 4", "n", Value::Int(20)),
+        // 一元负号
+        ("@set n = -5", "n", Value::Int(-5)),
+        ("@set n = -(2 + 3)", "n", Value::Int(-5)),
+        // 浮点字面量
+        ("@set f = 1.5", "f", Value::Float(1.5)),
+        ("@set f = 1.5 + 1.5", "f", Value::Float(3.0)),
+        // 整数和浮点混算 → 浮点
+        ("@set f = 1 + 0.5", "f", Value::Float(1.5)),
+        // 整数值的浮点字面量仍是整数
+        ("@set n = 3.0", "n", Value::Int(3)),
+        // 字符串和布尔照旧
+        ("@set s = \"文本\"", "s", Value::Str("文本".into())),
+        ("@set b = true", "b", Value::Bool(true)),
+    ];
+
+    for (line, name, expected) in cases {
+        let src = format!(":: start\n{line}\n@say \"x\"\n");
+        let vm = vm(&src);
+        assert_eq!(
+            vm.vars().get(*name),
+            Some(expected),
+            "`{line}` 应当得到 {expected:?}"
+        );
+    }
+}
+
+/// 表达式可以引用别的变量——这才是加算术的重点
+#[test]
+fn set_can_read_other_variables() {
+    let src = ":: start\n@set 好感 = 0\n@set 好感 = 好感 + 1\n@set 好感 = 好感 * 10\n@say \"x\"\n";
+    let vm = vm(src);
+    assert_eq!(vm.vars().get("好感"), Some(&Value::Int(10)));
+}
+
+/// 浮点变量也能参与运算，并且值能存进存档（RON 往返不丢精度）
+#[test]
+fn float_variables_round_trip_through_saves() {
+    let src = ":: start\n@set 信任 = 0.0\n@set 信任 = 信任 + 0.25\n@say \"x\"\n";
+    let vm = vm(src);
+    assert_eq!(vm.vars().get("信任"), Some(&Value::Float(0.25)));
+
+    // 存档走 RON：浮点必须原样回来
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("信任".to_string(), Value::Float(0.1 + 0.2));
+    let text = ron::ser::to_string(&vars).unwrap();
+    let back: std::collections::HashMap<String, Value> = ron::from_str(&text).unwrap();
+    assert_eq!(
+        back.get("信任"),
+        vars.get("信任"),
+        "浮点经 RON 往返必须完全相同（否则存档会因为精度不等而错）"
+    );
+}
+
+/// 浮点写进台词要好看：不能出现 1.2000000000000002 这种
+#[test]
+fn floats_display_cleanly_in_dialogue() {
+    let cases = [
+        (Value::Float(1.2), "1.2"),
+        (Value::Float(3.0), "3"),
+        (Value::Float(0.5), "0.5"),
+        (Value::Int(7), "7"),
+        (Value::Bool(true), "true"),
+        (Value::Str("啊".into()), "啊"),
+    ];
+    for (v, expected) in cases {
+        assert_eq!(v.to_string(), expected, "{v:?} 应当显示成 {expected}");
+    }
+
+    // 超过 6 位小数才截断，而且要顺手去掉尾巴上的 0
+    let long = Value::Float(1.0 / 3.0).to_string();
+    assert!(
+        long.len() <= 8 && !long.ends_with('0'),
+        "长小数应当截断且不留尾零，实际 {long}"
+    );
+}
+
+/// 算不出来的时候：**不赋值、不中断剧本**，把错误挂起来给作者看
+#[test]
+fn bad_arithmetic_reports_an_error_and_keeps_going() {
+    // 除以 0
+    let mut vm = vm(":: start\n@set 好感 = 5\n@set 好感 = 好感 / 0\n@say \"后面照常\"\n");
+    let err = vm.take_error().expect("除零应当报错");
+    assert!(err.contains("除以 0"), "错误说明应当是人话，实际: {err}");
+    assert_eq!(
+        vm.vars().get("好感"),
+        Some(&Value::Int(5)),
+        "算不出来时变量要保持原样，不能变成 NaN 或 0"
+    );
+    assert_eq!(
+        say_text(&vm).as_deref(),
+        Some("后面照常"),
+        "剧本不该因为一条 @set 出错就停住"
+    );
+    assert!(vm.take_error().is_none(), "错误取过一次就没了");
+}
+
+/// 未定义的变量：报错，而不是安静地当成 0
+#[test]
+fn unknown_variable_in_expression_is_an_error() {
+    let mut vm = vm(":: start\n@set n = 没设过 + 1\n@say \"x\"\n");
+    let err = vm.take_error().expect("未定义变量应当报错");
+    assert!(
+        err.contains("没设过"),
+        "错误里要点出是哪个变量，实际: {err}"
+    );
+    assert_eq!(vm.vars().get("n"), None, "出错时不该凭空建出这个变量");
+}
+
+/// 类型不对：字符串不能拿来做减法
+#[test]
+fn string_arithmetic_is_an_error() {
+    let mut vm = vm(":: start\n@set s = \"文本\"\n@set s = s - 1\n@say \"x\"\n");
+    let err = vm.take_error().expect("字符串减法应当报错");
+    assert!(err.contains("字符串"), "错误里要说清类型，实际: {err}");
+    assert_eq!(vm.vars().get("s"), Some(&Value::Str("文本".into())));
+}
+
+/// 语法错的表达式要在**解析期**就报出来，并指向那一行
+#[test]
+fn malformed_expressions_are_rejected_at_parse_time() {
+    for (src, why) in [
+        (":: start\n@set n = 1 +\n@say \"x\"\n", "算式没写完"),
+        (":: start\n@set n = (1 + 2\n@say \"x\"\n", "括号没闭合"),
+        (":: start\n@set n = 1 2\n@say \"x\"\n", "数字后面还有东西"),
+    ] {
+        let err = Program::from_source(src)
+            .err()
+            .unwrap_or_else(|| panic!("{why} 应当在解析期被拦下: {src}"));
+        assert_eq!(err.line, 2, "{why}: 报错行号应当指向 @set 那一行");
+    }
+}
+
+/// 大小比较按数值来：浮点变量和整数条件能对上
+#[test]
+fn numeric_comparisons_work_across_int_and_float() {
+    // 注意：多行剧本要用真正的多行字符串（`\` 续行会吃掉缩进）
+    let cases = [
+        // 好感是浮点，条件写整数 5
+        (
+            ":: start
+@set 好感 = 5.0
+@if 好感 >= 5
+    @say \"够\"
+@else
+    @say \"不够\"
+",
+            "够",
+        ),
+        // 反过来：整数变量，条件写浮点
+        (
+            ":: start
+@set 好感 = 5
+@if 好感 < 5.5
+    @say \"够\"
+@else
+    @say \"不够\"
+",
+            "够",
+        ),
+        // 不成立时要走到 else
+        (
+            ":: start
+@set 好感 = 1.5
+@if 好感 > 5
+    @say \"够\"
+@else
+    @say \"不够\"
+",
+            "不够",
+        ),
+    ];
+
+    for (src, expected) in cases {
+        let machine = vm(src);
+        assert_eq!(
+            say_text(&machine).as_deref(),
+            Some(expected),
+            "剧本:\n{src}"
+        );
+    }
+}
+
+/// 一条复杂但很现实的写法：好感积累 + 阈值判断
+#[test]
+fn a_realistic_affection_flow_works() {
+    // 注意：这里必须用真正的多行字符串。Rust 的 `\` 续行会把下一行的
+    // 前导空白一起吃掉，`@if` 下面的块就没有缩进，解析会报"需要缩进"。
+    let src = ":: start
+@set 好感 = 0
+@set 好感 = 好感 + 3
+@set 好感 = 好感 * 2
+@if 好感 >= 6
+    @say \"她笑了。\"
+@else
+    @say \"她没说话。\"
+";
+    let machine = vm(src);
+    assert_eq!(machine.vars().get("好感"), Some(&Value::Int(6)));
+    assert_eq!(say_text(&machine).as_deref(), Some("她笑了。"));
 }
 
 /// 条件不成立时要走 else，而不是掉进 then
