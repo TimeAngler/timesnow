@@ -370,9 +370,13 @@ keeps its history.
 - `A` — **auto-play**: advances 1.6s after a line finishes typing, with "▶ 自动" in the top-right;
   press `A` again to go back to manual
 - `K` (or hold `Ctrl`) — **skip**: pages through quickly, showing "▶▶ 跳过中";
-  it **stops at choices** rather than deciding for you
+  it **stops at choices** (with a notice) rather than deciding for you
+- `N` — **jump to the next choice**: walks forward and stops at the next choice, so you don't have
+  to hold skip and gamble on releasing it in time
 
-Neither mode makes you wait through `@wait` and `@fade` — those mean "don't wait for me".
+Skip advances many lines per frame rather than one, so a hundred-line chapter goes by in a second or
+two. `@wait` and `@fade` don't make you wait in skip mode — but **the fade still happens**, collapsed
+to zero seconds: when an author writes `@fade to 0.0 1.0` they want a transition, not a pause.
 
 ### Changing the volume
 
@@ -414,6 +418,7 @@ It only gives saves a readable label; it doesn't change what's on screen.
 | `PageUp` / `B` | Open the backlog |
 | `A` | Auto-play (press again to turn off) |
 | `K` / `Ctrl` | Skip (press again to turn off; stops at choices) |
+| `N` | Jump to the next choice |
 | `Esc` / `O` | Open settings (volume) |
 | `Esc` | Close the current screen |
 

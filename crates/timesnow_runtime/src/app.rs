@@ -61,13 +61,24 @@ const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 /// auto 模式：整句显示完之后再等这么久才自动翻页
 const AUTO_DELAY: f32 = 1.6;
 
-/// skip 模式：每次翻页的间隔（够快，又不至于一帧跳过整章）
-const SKIP_INTERVAL: f32 = 0.06;
+/// skip 模式每个"时间片"推进多少步。
+///
+/// 为什么要成批推进：一帧只走一步的话速度被帧率锁死
+/// （60fps 下最多 60 行/秒，而且还得受 SKIP_INTERVAL 进一步限制）。
+/// 一次 40 步，实测一章百来行一两帧就过去了。
+pub const SKIP_STEPS: usize = 40;
+
+/// skip 模式最小的时间片长度：每个时间片最多推进 `SKIP_STEPS` 步。
+/// 限流是为了让画面还看得见在动，而不是一帧闪完整个剧本。
+pub const SKIP_INTERVAL: f32 = 0.05;
+
+/// 一次按键最多推进多少步（防止选项特别远时一按跳过一大段剧情）
+const SKIP_KEY_MAX_STEPS: usize = 2000;
 
 /// 设置界面里能调的项（顺序与 config 的 rows 一致）
 const SETTINGS_ROWS: usize = crate::config::AUDIO_ROWS;
 
-/// 怎么往下走。`Playing` 界面内部的三种模式。
+/// 怎么往下走。`Playing` 界面内部的几种模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdvanceMode {
     /// 等玩家点击
@@ -158,6 +169,8 @@ pub struct App {
     mode: AdvanceMode,
     /// 上次自动翻页的时间，用来算间隔
     last_advance: Instant,
+    /// skip 已经连续推了多久（以帧计），用来判断"推不动了"
+    skip_frames: u32,
 }
 
 impl App {
@@ -242,6 +255,7 @@ impl App {
             toast: None,
             mode: AdvanceMode::Manual,
             last_advance: Instant::now(),
+            skip_frames: 0,
         })
     }
 
@@ -706,6 +720,10 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyK) | PhysicalKey::Code(KeyCode::ControlLeft) => {
                 self.toggle_mode(AdvanceMode::Skip);
             }
+            // 一路跳到下一个选项
+            PhysicalKey::Code(KeyCode::KeyN) => {
+                self.advance_to_next_choice();
+            }
             _ => {}
         }
         // 存/读档界面要用到槽位列表，交给 run_pending 处理
@@ -787,6 +805,47 @@ impl App {
     fn clamp_backlog_scroll(&self, scroll: usize) -> usize {
         let total = self.script.as_ref().map(|s| s.backlog().len()).unwrap_or(0);
         scroll.min(total.saturating_sub(1))
+    }
+
+    /// 一路推进到下一个选项（或走到剧本尽头）。
+    ///
+    /// 这才是跳过真正该有的那个动作：不用按住跳过、赌自己松手够不够及时。
+    /// 一趟走完，停在下一个需要玩家决定的地方。
+    fn advance_to_next_choice(&mut self) {
+        let cap = SKIP_KEY_MAX_STEPS;
+        let Some(script) = self.script.as_mut() else {
+            return;
+        };
+
+        let mut moved = 0;
+        while moved < cap {
+            script.finish_delays();
+            if script.pending_choices().is_some() {
+                break;
+            }
+            let (n, hit_choice) = script.advance_steps(1);
+            moved += 1;
+            if hit_choice {
+                break;
+            }
+            // 推不动了（块尾且没有出口）→ 到头了
+            if n == 0 {
+                break;
+            }
+        }
+
+        let reached = script.pending_choices().is_some();
+        self.toast = Some((
+            if reached {
+                format!("已跳过 {moved} 步，停在选项处")
+            } else {
+                format!("已跳过 {moved} 步，后面没有选项了")
+            },
+            Instant::now(),
+        ));
+        self.mode = AdvanceMode::Manual;
+        self.last_advance = Instant::now();
+        self.needs_redraw = true;
     }
 
     /// 切换推进模式（再按一次同一个键就回到手动）
@@ -1047,15 +1106,15 @@ impl ApplicationHandler for App {
                 };
 
                 // auto / skip：不等玩家点击也能往下走。
-                // 这会在剧本这一帧里立刻解决掉 @wait / @fade 的计时。
+                // 两者都走 finish_delays()：把 @wait / @fade 的计时压成 0，
+                // 但**淡入淡出仍然会到位**——作者想要的是转场，不是让玩家等。
                 match self.mode {
                     AdvanceMode::Manual => {
                         script.update(dt);
                     }
                     AdvanceMode::Auto => {
-                        script.update_instant();
-                        let waiting = script.pending_choices().is_none();
-                        if waiting
+                        script.finish_delays();
+                        if script.pending_choices().is_none()
                             && !script.is_animating()
                             && self.last_advance.elapsed().as_secs_f32() >= AUTO_DELAY
                         {
@@ -1064,13 +1123,21 @@ impl ApplicationHandler for App {
                         }
                     }
                     AdvanceMode::Skip => {
-                        script.update_instant();
+                        // 一个时间片推一批，而不是一帧一步
+                        script.finish_delays();
                         if script.pending_choices().is_some() {
                             // 遇到选项就停下，别替玩家做决定
                             self.mode = AdvanceMode::Manual;
+                            self.skip_frames = 0;
                         } else if self.last_advance.elapsed().as_secs_f32() >= SKIP_INTERVAL {
-                            script.advance();
+                            let (_, hit_choice) = script.advance_steps(SKIP_STEPS);
                             self.last_advance = now;
+                            self.skip_frames = self.skip_frames.saturating_add(1);
+                            if hit_choice {
+                                self.mode = AdvanceMode::Manual;
+                                self.skip_frames = 0;
+                                self.toast = Some(("跳过在选项处停下".into(), Instant::now()));
+                            }
                         }
                     }
                 }

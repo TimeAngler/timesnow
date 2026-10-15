@@ -273,6 +273,14 @@ impl Vm {
         &self.backlog
     }
 
+    /// 撤掉最后一条历史。
+    ///
+    /// 跳过模式专用：它靠"先走一步、再看落点"来发现选项，走到选项时会
+    /// 顺手把选项前那句记进历史——但玩家在跳过时并没有看到它，得撤掉。
+    pub fn drop_last_history(&mut self) {
+        self.backlog.pop();
+    }
+
     pub fn set_backlog(&mut self, backlog: Vec<HistoryEntry>) {
         self.backlog = backlog;
         if self.backlog.len() > BACKLOG_LIMIT {
@@ -772,37 +780,118 @@ impl Script {
         }
     }
 
-    /// 无视 `@wait` / `@fade` 的时长，一步到位地推进。
+    /// 把 `@wait` / `@fade` 的计时一步走完，然后推进到下一个阻塞点。
     ///
-    /// auto / skip 用：那时玩家的意思是"别等我"，让他们还去等
-    /// 淡入淡出的两秒钟就不合理了。
-    pub fn update_instant(&mut self) -> Outcome {
+    /// **注意**：这是"别让我等"，不是"别做这件事"。
+    /// 淡入淡出会**瞬间到位**（画面仍然会变成目标状态），而不是被抹掉——
+    /// 作者写 `@fade to 0.0 1.0` 是想要一个可见的转场，
+    /// 跳过模式该做的是把它压缩成 0 秒，而不是让它不发生。
+    pub fn finish_delays(&mut self) -> Outcome {
         self.check_reload();
+
+        // 光标是不是停在"正在计时"的那一步上（@wait / @fade）。
+        // 是的话必须显式把它推过去——只清掉计时器的话光标还停在原处，
+        // 下一帧又会重新开始等。
+        let at_delay_step = matches!(
+            self.vm.current_step(),
+            Some(Step::Wait { .. } | Step::Fade { .. })
+        );
 
         // 正在淡入淡出：直接把 alpha 顶到目标值
         if self.presentation.fade_duration > 0.0 {
             self.presentation.current_alpha = self.presentation.fade_to;
             self.presentation.fade_duration = 0.0;
-            let outcome = self.vm.finish_blocking_step();
-            self.absorb(outcome.clone());
-            return outcome;
         }
 
         // 正在 @wait：直接跳过
         if self.presentation.wait_timer > 0.0 {
             self.presentation.wait_timer = 0.0;
-            let outcome = self.vm.finish_blocking_step();
-            self.absorb(outcome.clone());
-            return outcome;
         }
 
+        // 顺便把打字机打完——skip 时没必要一个字一个字等
         if self.is_typing() {
-            // 打字机在 auto/skip 下也直接打完
             self.skip_typewriter();
         }
-        let outcome = self.vm.run_until_blocked();
+
+        let outcome = if at_delay_step {
+            self.vm.finish_blocking_step()
+        } else {
+            self.vm.run_until_blocked()
+        };
         self.absorb(outcome.clone());
         outcome
+    }
+
+    /// 连续推进 `steps` 步（跳过模式用）。
+    ///
+    /// 为什么不复用 `advance()`：那个函数在"还在打字"时会先整句显示、
+    /// **不往前走的**，所以一帧只能推进一行。跳过要的是一帧推进很多行，
+    /// 否则速度被帧率锁死（60fps 下最多 16 行/秒，跳一章要好几秒）。
+    ///
+    /// 怎么发现选项：**先走一步，再看落点**。
+    /// 一开始我试着"提前看下一个位置是不是选项"，但块尾的 `@jump`
+    /// 会让这个预判失效（跳转后的落点在另一个块里）——所以改成看实际落点。
+    ///
+    /// 返回 `(实际推进的步数, 是否因为遇到选项而停下)`。
+    pub fn advance_steps(&mut self, steps: usize) -> (usize, bool) {
+        let mut moved = 0;
+
+        for _ in 0..steps.max(1) {
+            // 每步开始先把 @wait / @fade 收掉——**必须走 finish_delays()**，
+            // 它会连 VM 里那一步一起推进；只清表现层的计时器的话，
+            // 光标还停在原处，下一步会发现位置没动，误判成"到头了"。
+            self.finish_delays();
+            if self.is_typing() {
+                self.skip_typewriter();
+            }
+
+            // 已经停在选项上：停下，别替玩家做决定
+            if self.vm.pending_choice().is_some() {
+                return (moved, true);
+            }
+
+            let before = self.position();
+
+            if self.vm.current_step().is_none() {
+                // 块尾：@jump / @if 都在这里处理，也可能这一块就到头了
+                let outcome = self.vm.run_until_blocked();
+                self.absorb(outcome);
+            } else if matches!(
+                self.vm.current_step(),
+                Some(Step::Wait { .. } | Step::Fade { .. })
+            ) {
+                // 光标还停在 @wait / @fade 上：用 finish_blocking_step 推过去。
+                // **不能**用 advance()——那个函数在计时类指令上是空操作
+                // （手动点击时不该有反应），会让跳过卡死在这一步。
+                let outcome = self.vm.finish_blocking_step();
+                self.absorb(outcome);
+            } else {
+                self.remember_last_say();
+                self.presentation.visible_chars = 0;
+                self.presentation.text_timer = 0.0;
+                let outcome = self.vm.advance();
+                self.absorb(outcome);
+            }
+
+            // 位置没动 → 到头了（块尾且没有出口）
+            if self.position() == before {
+                break;
+            }
+            moved += 1;
+
+            // 落点就是选项：把刚才那句从历史里撤掉（玩家没看到它），然后停
+            if self.vm.pending_choice().is_some() {
+                self.vm.drop_last_history();
+                return (moved, true);
+            }
+        }
+
+        (moved, self.vm.pending_choice().is_some())
+    }
+
+    /// 当前位置（块名 + 步号），用来判断"这一步到底有没有往前走"
+    fn position(&self) -> (String, usize) {
+        (self.vm.block().to_string(), self.vm.step_index())
     }
 
     fn tick_typewriter(&mut self, dt: f32) {
@@ -1745,52 +1834,52 @@ mod tests {
 
     /// auto / skip 下不该让玩家干等 `@wait`
     #[test]
-    fn update_instant_skips_wait() {
+    fn finish_delays_skips_wait() {
         let mut s = script(":: start\n@wait 5.0\n@say \"之后\"\n");
         assert!(s.is_animating(), "手动模式下 @wait 会持续出帧");
 
-        s.update_instant();
+        s.finish_delays();
         assert_eq!(s.current_full_text().as_deref(), Some("之后"));
     }
 
     /// 淡入淡出也一样：一步到位把 alpha 顶到目标值
     #[test]
-    fn update_instant_skips_fade() {
+    fn finish_delays_skips_fade() {
         let mut s = script(":: start\n@fade to 0.0 3.0\n@say \"之后\"\n");
-        s.update_instant();
+        s.finish_delays();
         assert_eq!(s.current_alpha(), 0.0, "alpha 应当直接到目标值");
         assert_eq!(s.current_full_text().as_deref(), Some("之后"));
     }
 
     /// 打字机也要立刻打完
     #[test]
-    fn update_instant_finishes_the_typewriter() {
+    fn finish_delays_finishes_the_typewriter() {
         let mut s = script(":: start\n@say \"一二三四五\"\n");
         s.presentation.speed = 0.5;
         assert_eq!(s.current_text(), "");
 
-        s.update_instant();
+        s.finish_delays();
         assert_eq!(s.current_text(), "一二三四五");
         assert!(!s.is_animating(), "skip 之后不该还在打字");
     }
 
     /// 立刻推进也不能跳过选项——那等于替玩家做决定
     #[test]
-    fn update_instant_stops_at_a_choice() {
+    fn finish_delays_stops_at_a_choice() {
         let mut s =
             script(":: start\n@say \"选一个\"\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n");
-        s.update_instant();
+        s.finish_delays();
         s.advance();
-        s.update_instant();
+        s.finish_delays();
         assert!(s.pending_choices().is_some(), "立刻推进也必须停在选项上");
     }
 
     /// 反复调用不该卡住，也不该把位置弄乱
     #[test]
-    fn update_instant_is_idempotent_when_already_settled() {
+    fn finish_delays_is_idempotent_when_already_settled() {
         let mut s = script(":: start\n@say \"甲\"\n@say \"乙\"\n");
         for _ in 0..5 {
-            s.update_instant();
+            s.finish_delays();
         }
         assert_eq!(s.current_full_text().as_deref(), Some("甲"), "位置不该乱走");
     }
@@ -1803,6 +1892,155 @@ mod tests {
         assert_eq!(s.current_full_text(), None, "手动模式仍要等满 1 秒");
         s.update(1.0);
         assert_eq!(s.current_full_text().as_deref(), Some("之后"));
+    }
+
+    // ---------- skip：成批推进 ----------
+
+    /// 造一段 `lines` 行的剧本（跳过要能一口气吃掉）
+    fn long_script(lines: usize) -> String {
+        let mut src = String::from(":: start\n");
+        for i in 0..lines {
+            src.push_str(&format!("@say \"第 {i} 句\"\n"));
+        }
+        src
+    }
+
+    /// **这条是"跳不动"的回归测试。**
+    ///
+    /// 以前 skip 一帧只推进一步（受帧率和间隔限制），最多 16 行/秒，
+    /// 跳一章要好几秒——玩家会觉得"根本没跳过"。
+    /// 现在一帧推一批，必须能一次吃掉几十行。
+    #[test]
+    fn advance_steps_moves_many_lines_in_one_call() {
+        let mut s = script(&long_script(200));
+        let (moved, hit_choice) = s.advance_steps(40);
+        assert!(!hit_choice);
+        assert_eq!(moved, 40, "一次调用应当推进满 40 步，实际 {moved}");
+    }
+
+    /// 一整章要能在很少的几次调用里走完，而不是上百帧
+    #[test]
+    fn a_whole_chapter_takes_only_a_few_batches() {
+        let mut s = script(&long_script(200));
+        let mut total = 0;
+        let mut calls = 0;
+        while total < 200 && calls < 100 {
+            let (n, _) = s.advance_steps(40);
+            if n == 0 {
+                break;
+            }
+            total += n;
+            calls += 1;
+        }
+        assert!(total >= 200, "200 行应当能走完，实际只走了 {total}");
+        assert!(
+            calls <= 8,
+            "200 行用了 {calls} 次调用，还是被限流了（应当 ≤ 8 次）"
+        );
+    }
+
+    /// 遇到选项必须停下，而且是**提前**停下
+    /// （不能让玩家看到选项画面闪一下再被跳过）
+    #[test]
+    fn advance_steps_stops_before_showing_the_choice() {
+        let src =
+            ":: start\n@say \"一\"\n@say \"二\"\n@choice\n    甲 -> end\n\n:: end\n@say \"完\"\n";
+        let mut s = script(src);
+        let (moved, hit_choice) = s.advance_steps(40);
+        assert!(hit_choice, "应当报告遇到了选项");
+        assert!(moved >= 1, "至少走了一步");
+        assert!(s.pending_choices().is_some(), "要停在选项上等玩家决定");
+
+        // 选项仍然可用，说明状态是干净的
+        s.select_choice(0);
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("完"));
+    }
+
+    /// 跳过时 @wait 不阻塞，但**淡入淡出仍然会到位**——
+    /// 作者要的是转场，不是让玩家等
+    #[test]
+    fn advance_steps_collapses_delays_but_keeps_the_fade_result() {
+        let src = ":: start\n@fade to 0.0 2.0\n@wait 5.0\n@say \"甲\"\n@say \"乙\"\n";
+        let mut s = script(src);
+        let (moved, _) = s.advance_steps(5);
+        assert!(moved >= 2, "应当跨过 fade 和 wait，实际走了 {moved} 步");
+        assert_eq!(s.current_alpha(), 0.0, "淡出必须真的生效");
+        assert!(!s.is_animating(), "跳过后不该还挂着计时");
+    }
+
+    /// 块尾的 @jump 在跳过时也要被跟上（不能卡在原块）
+    ///
+    /// 注意语义：跳过是"把这一行翻过去"，所以走完之后块已经到头了——
+    /// 想停在某句上细看，那是手动模式的事。
+    #[test]
+    fn advance_steps_follows_jumps() {
+        let src = ":: a\n@say \"一\"\n@jump b\n\n:: b\n@say \"二\"\n@say \"三\"\n";
+        let mut s = script(src);
+        let (moved, hit_choice) = s.advance_steps(10);
+        assert!(!hit_choice);
+        assert_eq!(s.block(), "b", "应当跟到 b 块，而不是卡在 a");
+        assert!(
+            moved >= 3,
+            "应当跨过 a 的一行、jump、b 的两行，实际 {moved} 步"
+        );
+        assert!(s.current_full_text().is_none(), "跳过之后这一块到头了");
+        assert_eq!(s.backlog().len(), 3, "翻过去的三句都该进历史");
+        assert_eq!(s.backlog()[2].text, "三");
+    }
+
+    /// 跳过不会把位置推到剧本之外
+    #[test]
+    fn advance_steps_stops_at_the_end_of_the_script() {
+        let mut s = script(&long_script(10));
+        let (moved, hit_choice) = s.advance_steps(500);
+        assert!(!hit_choice);
+        assert!(moved <= 11, "不该推过头，实际 {moved}");
+        assert_eq!(s.block(), "start");
+    }
+
+    /// 跳过速度必须比旧实现快一个数量级（旧：≈16 行/秒）
+    #[test]
+    fn skip_throughput_beats_the_old_one_line_per_frame() {
+        // 新实现：一次调用 SKIP_STEPS 行，每 SKIP_INTERVAL 秒一次
+        let new_lines_per_second = crate::app::SKIP_STEPS as f64 / crate::app::SKIP_INTERVAL as f64;
+        const OLD_LINES_PER_SECOND: f64 = 16.0;
+        assert!(
+            new_lines_per_second > OLD_LINES_PER_SECOND * 10.0,
+            "跳过只有 {new_lines_per_second} 行/秒，比旧实现快不了多少"
+        );
+    }
+
+    /// "跳到下一个选项"（N 键）背后那套循环：
+    /// 不管中间隔了多少行都要走到选项上，而且调用次数是有界的
+    #[test]
+    fn advancing_to_the_next_choice_reaches_it_in_bounded_steps() {
+        let mut src = String::from(":: start\n");
+        for i in 0..300 {
+            src.push_str(&format!("@say \"第 {i} 句\"\n"));
+        }
+        src.push_str("@choice\n    甲 -> end\n    乙 -> end\n\n:: end\n@say \"完\"\n");
+
+        let mut s = script(&src);
+        let mut calls = 0;
+        while s.pending_choices().is_none() && calls < 50 {
+            s.finish_delays();
+            let (n, hit) = s.advance_steps(40);
+            if n == 0 && !hit {
+                break;
+            }
+            calls += 1;
+        }
+        assert!(
+            s.pending_choices().is_some(),
+            "300 行之后应当停在选项上，实际用了 {calls} 次"
+        );
+        assert!(calls <= 10, "用了 {calls} 次调用，说明每次推得太少");
+
+        // 停下之后选项必须是能用的
+        s.select_choice(1);
+        s.update(1.0);
+        assert_eq!(s.current_full_text().as_deref(), Some("完"));
     }
 
     // ---------- 选项布局 ----------
