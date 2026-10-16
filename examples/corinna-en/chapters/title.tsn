@@ -1,0 +1,200 @@
+# ------------------------------------------------------------------
+# The Holy Maiden · Corinna
+# A short story about silence and faith
+#
+# English translation of ../corinna (examples/corinna).
+# Same blocks, same scenes, same timing -- only the words differ.
+# ------------------------------------------------------------------
+
+:: prologue
+@scene cathedral
+@play bgm sorrow
+
+@say "A nun of the cathedral — claiming to be a holy maiden, scorning the royal house, spreading heresy—"
+@say Magistrate "To the dungeons. Trial tomorrow."
+@wait 0.5
+
+@say "He holds up the king's writ, his face empty."
+@say "His eyes are iron hooks, and they catch on the maiden's resistance."
+@wait 1.0
+
+@say "……"
+@wait 0.5
+
+@say "The maiden closes her eyes. Both hands grip the cross in prayer."
+@wait 0.5
+
+@play se bell
+@say "The guard wrenches her hands behind her. Her knuckles crack."
+@say "Fresh blood stays on the cross."
+@wait 1.0
+
+@say Magistrate "A nun of the cathedral — no. A witch. Questioned at the tribunal tomorrow."
+@say "The magistrate does not look back. He walks to the palace, each step planted."
+@jump crowd_voice
+
+:: crowd_voice
+@say Crowd "She is no witch — she is a holy maiden! She is the one who brought the rain from God!"
+@say Guard "Holy maiden? She is a criminal."
+@say "The guard snorts and pulls the maiden on toward the dungeons."
+@wait 0.5
+
+@show corinna at 0.394 0.145 0.211 0.75
+@say Maiden "Thank you. Truly. The Lord will keep me. Do not be afraid."
+@say "The maiden looks at the crowd who spoke for her, and smiles."
+@say "Inside her sleeve, her other hand is pinching her own thigh."
+@hide corinna
+@wait 1.0
+@jump cart
+
+:: cart
+@fade to 0.0 0.5
+@scene street
+@fade to 1.0 0.5
+
+@say "The cart's wheels turn slowly forward."
+@say "The maiden sees a mother hiding at the roadside with her child."
+@say "Days ago she had stood in front of them. Their lips were trembling the same way then."
+@wait 0.5
+@say "She grips the cross again and prays for them."
+@wait 1.0
+
+@play se bell
+@say "Clang."
+@say "The iron door closes."
+@jump cell_night
+
+:: cell_night
+@fade to 0.0 0.5
+@scene cell
+@fade to 1.0 0.5
+
+@say "She drops to her knees at once. Eyes shut. Hands on her knees."
+@say "The cross gives off a dim light in the air."
+@wait 1.0
+
+@say Maiden "My Lord."
+@say "The maiden draws a long breath in. And lets it out."
+@wait 0.5
+@say Maiden "I am afraid I can serve you no longer."
+@wait 1.5
+
+@say "Breathing in the scent of the cross, she hears God whisper at her ear."
+@wait 0.5
+@say "My believer. This is the sin you were always going to bear."
+@wait 1.0
+
+@say "The maiden's brow tightens."
+@wait 1.5
+@jump trial_eve
+
+:: trial_eve
+@fade to 0.0 1.0
+@fade to 1.0 0.5
+
+@say Guard "Hey. Holy maiden, whatever you are. Wake up. You cannot be late to your own trial."
+@say "The maiden watches the guard unlock the cell."
+@say "She follows close behind him."
+@wait 0.5
+@say "She is pushed into the cart."
+@jump trial_outside
+
+:: trial_outside
+@fade to 0.0 0.5
+@scene court_outside
+@fade to 1.0 0.5
+
+@say "She meets the eyes of yesterday's mother. Her lips start to shake."
+@wait 1.0
+@say "The wheels stop turning."
+@wait 0.5
+@say "She sees the crowd who spoke for her yesterday, standing in front of the tribunal."
+@wait 0.5
+
+@say Crowd "She is not a witch! You devils!"
+@say "She sees the sunlight in their hair."
+@wait 0.5
+
+@say Magistrate "Get out of the way."
+@say "The magistrate strolls over with a pack of guards behind him."
+@say "Every one of the crowd tightens their fists."
+@say "The guards fan out on either side of the magistrate."
+@wait 1.0
+
+@say Maiden "My lord magistrate. Let them go."
+@say "The maiden looks at the magistrate and bows her head."
+@wait 0.5
+
+@say Magistrate "The dungeons are still mostly empty—"
+@say "The magistrate pats his leather cape. His face does not move."
+@wait 0.5
+@say Magistrate "Would you like to try them?"
+@wait 1.5
+
+@say "The sunlight suddenly turns yellow, then black."
+@play se gavel
+@say "And then a gavel falls."
+@fade to 0.0 0.3
+@jump trial
+
+:: trial
+@scene court
+@fade to 1.0 0.5
+
+@say "She just stands there. Watching."
+@wait 1.0
+
+@say Clerk "Corinna."
+@say "The clerk opens the file and speaks without hurry."
+@say Clerk "Do you admit your guilt?"
+@wait 0.5
+
+@say "He lists her crimes, word by word, nailing the cross into her palm."
+@wait 1.5
+
+@say Corinna "I am guilty."
+@wait 1.5
+
+@say "The court goes quiet."
+@wait 1.0
+
+@say "She tears the cross off."
+@play se bell
+@say "It lands on the flagstones with a small sound."
+@wait 1.0
+
+@say Judge "Accept your sin, then. Openly."
+@say "This is the judge's final ruling."
+@wait 2.0
+@jump ending
+
+:: ending
+@fade to 0.0 1.5
+@scene cell_night
+@stop bgm
+@play bgm sorrow
+@fade to 1.0 1.5
+
+@say "Corinna sits on the moldy straw of her cell, eyes on the bright moon in the window."
+@wait 1.0
+@say "The moonlight sits quietly inside the bars."
+@wait 0.5
+@say "She crouches down slowly and touches the moon on the floor."
+@wait 0.5
+@say "Cold. Like her cross."
+@wait 1.0
+
+@say "Tears leave her eyes and fall on the back of her hand."
+@say "Her cross. The old priest gave it to her."
+@wait 0.5
+@say "It is gone now."
+@wait 1.5
+
+@say "She draws her hand back."
+@say "Both knees go down."
+@say "Her hands clasp tight. Eyes on the moon. Her lips keep moving."
+@wait 2.0
+
+@fade to 0.0 3.0
+@say "— The End —"
+@quit

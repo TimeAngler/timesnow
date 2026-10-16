@@ -1,0 +1,51 @@
+[window]
+title = "Corinna"
+width = 1280
+height = 720
+
+[textbox]
+x = 0.05
+y = 0.63
+w = 0.9
+h = 0.31
+
+[text]
+font_size = 36.0
+line_height = 48.0
+scale = 1.0
+x = 0.08
+y = 0.68
+color = [
+    255,
+    255,
+    255,
+]
+speed = 0.03
+name_x = 0.08
+name_y = 0.645
+name_scale = 1.1
+name_color = [
+    255,
+    220,
+    180,
+]
+
+[choice]
+x = 0.2
+w = 0.6
+h = 0.08
+gap = 0.02
+y_center = 0.5
+text_pad_x = 0.05
+text_pad_y = 0.3
+color = [
+    220,
+    220,
+    220,
+]
+
+[audio]
+master = 1.0
+bgm = 0.7
+se = 0.9
+muted = false

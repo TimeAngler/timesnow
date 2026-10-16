@@ -72,10 +72,16 @@ references that `assets/` doesn't have, and validates `config.toml`. Exits non-z
 
 - [`examples/minimal`](examples/minimal) — smallest runnable project
 - [`examples/phone`](examples/phone) — a complete short story: 10 chapters and 4 endings
+- [`examples/corinna`](examples/corinna) — a short single-route story (Chinese): a holy maiden
+  tried as a witch
+- [`examples/corinna-en`](examples/corinna-en) — **the same story in English**, for a wider
+  audience. Same blocks and timing, different words
 
 ```bash
 cargo run -p minimal
 cargo run -p phone
+cargo run -p corinna       # Chinese
+cargo run -p corinna-en    # English
 ```
 
 ## DSL Example

@@ -70,10 +70,15 @@ cargo run -- --check
 
 - [`examples/minimal`](examples/minimal) — 最小可运行示例
 - [`examples/phone`](examples/phone) — 完整短篇：10 章、4 个结局
+- [`examples/corinna`](examples/corinna) — 单线短篇《圣女 · 可列安娜》
+- [`examples/corinna-en`](examples/corinna-en) — **同一篇的英文版**，给不看中文的人。
+  块和节奏完全一样，只有文字不同
 
 ```bash
 cargo run -p minimal
 cargo run -p phone
+cargo run -p corinna       # 中文
+cargo run -p corinna-en    # English
 ```
 
 ## DSL 示例
