@@ -508,6 +508,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "corinna"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "timesnow",
+]
+
+[[package]]
 name = "cosmic-text"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
