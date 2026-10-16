@@ -219,7 +219,19 @@ fn config_diagnostics(project_dir: &Path) -> Vec<Diagnostic> {
 /// 检查剧本引用的 sprite / 音频是否存在。
 /// 对应的资源目录根本不存在时跳过——那多半是还没开始做美术，不该报错。
 fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnostic>) {
-    let sprites = assets::scan_all(project_dir);
+    // **校验器需要按种类分**。`@scene` 只能引用 `bg/` 里的，`@show` 只能引用
+    // `character/` 里的。之前用的是扁平的 `scan_all`，于是"可用的背景"里会混进
+    // UI 图片和立绘——真实踩到过：corinna 示例里 `@scene cell` 的建议列表
+    // 出现了 `corinna`、`textbox`、`white`，把建议带偏了。
+    //
+    // 运行时的查找仍然用扁平表（`Script` 那边），它只认名字、不关心种类。
+    let by_kind = assets::scan_by_kind(project_dir);
+    let names_of = |kind: &str| -> Vec<&str> {
+        by_kind
+            .get(kind)
+            .map(|s| s.iter().map(|n| n.as_str()).collect())
+            .unwrap_or_default()
+    };
     let audio = timesnow_audio::scan_audio(project_dir);
 
     let has_bg = project_dir.join("assets").join("bg").exists();
@@ -281,13 +293,20 @@ fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnosti
                 continue;
             }
 
+            // 判定也要按种类：`@scene` 找不到 `bg/` 里的同名文件就是找不到，
+            // 哪怕 `ui/` 或 `character/` 里有个同名的。否则 `@scene textbox`
+            // 会被放过去，而渲染时它是画不出来的。
+            //
+            // 早期的 `assets/char/` 不用单独处理：分组表在 `character/`
+            // 不存在时会把 `char/` 归到 `character`，所以上面已经覆盖。
             let found = match kind {
                 "BGM" | "音效" => audio_names.contains_key(&format!(
                     "{}/{}",
                     if kind == "BGM" { "bgm" } else { "se" },
                     name
                 )),
-                _ => sprites.contains_key(name),
+                "背景" => by_kind.get("bg").is_some_and(|s| s.contains(name)),
+                _ => by_kind.get("character").is_some_and(|s| s.contains(name)),
             };
 
             if !found {
@@ -308,7 +327,10 @@ fn check_assets(project_dir: &Path, script: &ScriptFile, out: &mut Vec<Diagnosti
                     .filter_map(|k| k.strip_prefix(&format!("{want}/")))
                     .collect()
             }
-            _ => sprites.keys().map(|s| s.as_str()).collect(),
+            // 背景只列 `bg/` 里的，立绘只列 `character/` 里的。
+            // 混在一起会让"可用的背景"出现 UI 图片的名字，把建议带偏。
+            "背景" => names_of("bg"),
+            _ => names_of("character"),
         };
         let hint = crate::suggest::suggestion_message(&name, candidates, &kind);
         out.push(Diagnostic {
@@ -920,6 +942,57 @@ mod tests {
             text.iter()
                 .any(|t| t.contains("village") && t.contains("forest")),
             "两个都要列出来，实际：{text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 候选必须**同种类**：背景的建议里不能出现 UI 图片或立绘。
+    ///
+    /// 回归测试。之前用的是扁平的 `scan_all`，于是 `corinna` 示例里
+    /// `@scene cell` 的建议列表变成了 `cathedral、corinna、textbox、white`——
+    /// 后三个是立绘和 UI，不是背景。这种建议会**把人带偏**：
+    /// 照着它改，改完背景还是画不出来。
+    #[test]
+    fn asset_candidates_stay_within_the_same_kind() {
+        let dir = fresh_dir("asset_kind");
+        write(&dir, "config.toml", "[window]\ntitle = \"x\"\n");
+        for sub in ["bg", "character", "ui"] {
+            std::fs::create_dir_all(dir.join("assets").join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("assets/bg/cathedral.png"), b"x").unwrap();
+        std::fs::write(dir.join("assets/character/corinna.png"), b"x").unwrap();
+        std::fs::write(dir.join("assets/ui/textbox.png"), b"x").unwrap();
+
+        // ① 背景的建议里只有 bg/
+        write(&dir, "script.tsn", ":: start\n@scene nope\n@say \"x\"\n");
+        let text = summary(&validate(&dir));
+        assert!(
+            text.iter().any(|t| t.contains("cathedral")),
+            "该列出背景 cathedral：{text:?}"
+        );
+        assert!(
+            !text.iter().any(|t| t.contains("textbox")),
+            "UI 图片不该出现在背景候选里：{text:?}"
+        );
+
+        // ② 立绘的建议里只有 character/
+        write(
+            &dir,
+            "script.tsn",
+            ":: start\n@show nope at 0.5 0.5 0.2 0.2\n@say \"x\"\n",
+        );
+        let text = summary(&validate(&dir));
+        assert!(
+            text.iter().any(|t| t.contains("corinna")),
+            "该列出立绘 corinna：{text:?}"
+        );
+        assert!(
+            !text.iter().any(|t| t.contains("textbox")),
+            "UI 图片不该出现在立绘候选里：{text:?}"
+        );
+        assert!(
+            !text.iter().any(|t| t.contains("cathedral")),
+            "背景不该出现在立绘候选里：{text:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
