@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use crate::program::save_version;
-use crate::tween::{Easing, MoveTween};
+use crate::tween::Easing;
 
 /// 记录一组文件的修改时间，用于热重载检测
 fn collect_mtimes(paths: &[PathBuf]) -> Vec<(PathBuf, SystemTime)> {
@@ -490,97 +490,10 @@ pub enum AudioEvent {
 // 调用方的 `crate::script::Vm` 路径不用改。
 pub use crate::vm::{Outcome, Vm};
 
-/// 表现层：只管时间。打字机、`@wait`、`@fade` 的计时都在这里。
-pub struct Presentation {
-    visible_chars: usize,
-    text_timer: f32,
-    wait_timer: f32,
-
-    current_alpha: f32,
-    fade_from: f32,
-    fade_to: f32,
-    fade_elapsed: f32,
-    fade_duration: f32,
-
-    pub speed: f32,
-    /// 正在移动的立绘。每个 sprite 最多一条——重新 `@move` 会替换旧的。
-    moves: Vec<MoveTween>,
-}
-
-impl Default for Presentation {
-    fn default() -> Self {
-        Self {
-            visible_chars: 0,
-            text_timer: 0.0,
-            wait_timer: 0.0,
-            current_alpha: 1.0,
-            fade_from: 1.0,
-            fade_to: 1.0,
-            fade_elapsed: 0.0,
-            fade_duration: 0.0,
-            speed: 0.03,
-            moves: Vec::new(),
-        }
-    }
-}
-
-impl Presentation {
-    /// 启动一个立绘移动。同一个 sprite 已在动时，旧动画作废。
-    pub(crate) fn start_move(
-        &mut self,
-        sprite: String,
-        from: StageRect,
-        to: StageRect,
-        duration: f32,
-        easing: Easing,
-    ) {
-        self.moves.retain(|m| m.sprite != sprite);
-        self.moves
-            .push(MoveTween::new(sprite, from, to, duration, easing));
-    }
-
-    pub(crate) fn advance_moves(&mut self, dt: f32) {
-        for m in self.moves.iter_mut() {
-            m.advance(dt);
-        }
-        self.moves.retain(|m| !m.is_done());
-    }
-
-    /// 让所有动画**立刻到终点**，而不是把它们忘掉。
-    ///
-    /// 语义上必须用 `finish()`（elapsed 顶到 duration）而不是直接 `clear()`：
-    /// `sample()` 是 `Stage`（终态）和 tween 采样值的叠加，
-    /// 把 tween 扔掉会让采样退回起点，也就是"跳过之后立绘弹回原位"。
-    /// 现在 `Vm` 执行 `@move` 时已经把 Stage 更到终态、所以结果碰巧一样，
-    /// 但那是巧合，不该依赖。
-    pub(crate) fn finish_moves(&mut self) {
-        for m in self.moves.iter_mut() {
-            m.finish();
-        }
-        self.moves.retain(|m| !m.is_done());
-    }
-
-    pub(crate) fn is_moving(&self) -> bool {
-        !self.moves.is_empty()
-    }
-
-    /// Stage 里存的是终态；这里叠加正在进行的 tween 采样值。
-    pub(crate) fn sample_stage(&self, stage: &Stage) -> Vec<(String, StageRect)> {
-        stage
-            .characters
-            .iter()
-            .map(|(name, rect)| {
-                let r = self
-                    .moves
-                    .iter()
-                    .find(|m| &m.sprite == name)
-                    .map(|m| m.sample())
-                    .unwrap_or(*rect);
-                (name.clone(), r)
-            })
-            .collect()
-    }
-}
+// `Presentation` 搬到了 `presentation.rs`，这里重新导出。
+// 它是 `pub(crate)`：`Script` 会直接读写它的字段（打字机进度、
+// 淡入淡出的计时），所以它和门面必须在同一个 crate 里。
+pub(crate) use crate::presentation::Presentation;
 
 /// 门面：把不可变的 `Program`、纯逻辑的 `Vm`、管时间的 `Presentation`
 /// 和文件监听拼在一起。`app` 只跟它打交道。

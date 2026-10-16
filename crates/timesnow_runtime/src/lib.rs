@@ -9,6 +9,10 @@ pub mod suggest;
 pub mod validate;
 pub mod vm;
 
+/// 表现层：只管时间（打字机、`@wait`、`@fade`、`@move`）。
+///
+/// `pub(crate)`：`Script` 会直接读写它的字段，所以它不该是给作者用的 API。
+pub(crate) mod presentation;
 pub(crate) mod tween;
 #[cfg(test)]
 mod vm_tests;
@@ -17,7 +21,7 @@ pub use app::App;
 pub use config::Config;
 pub use program::{Fingerprint, Program, SAVE_VERSION, SaveData, SaveNotice};
 pub use saves::{SLOT_COUNT, SlotInfo};
-pub use script::{Control, HistoryEntry, Outcome, Presentation, Script, Vm};
+pub use script::{Control, HistoryEntry, Outcome, Script, Vm};
 pub use validate::{Diagnostic, DiagnosticLevel, Report, validate};
 
 use std::path::Path;
