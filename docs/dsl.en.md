@@ -74,7 +74,7 @@ Use `{variable}` to drop a variable's value into a line:
 
 ```tsn-fragment
 @scene forest
-@show adrian at 0.55 0.10 0.40 0.85
+@show adrian at 0.749 0.25 0.211 0.75
 @hide adrian
 @clear
 ```
@@ -93,28 +93,35 @@ Use `{variable}` to drop a variable's value into a line:
 | `w` | Width as a fraction of screen width |
 | `h` | Height as a fraction of screen height |
 
-**Common placements:**
+**Pick `w` / `h` first (size and shape), then `x` / `y` (placement).**
 
-| Placement | x | y | w | h |
-|---|---|---|---|---|
-| Center | 0.30 | 0.10 | 0.40 | 0.85 |
-| Right | 0.55 | 0.10 | 0.40 | 0.85 |
-| Left | 0.05 | 0.10 | 0.40 | 0.85 |
+**① Size:** `w` and `h` are screen fractions, so the **drawn aspect ratio is
+`(w × screen_width) : (h × screen_height)`** — the sprite only keeps its shape when that matches
+the source image. To make a sprite occupy `h` of the screen height, work backwards for `w`:
 
-**Do not copy those `w` / `h` values blindly** — they decide whether your sprite gets squashed.
-All four numbers are screen fractions, so the **drawn aspect ratio is `(w × screen_width) : (h × screen_height)`**,
-and the sprite only keeps its shape when that matches the source image.
+```
+w = h × 0.5625 × (source_width ÷ source_height)        0.5625 = 9/16, the 16:9 factor
+```
 
-The `w=0.40 h=0.85` row above works out to `0.40×16 : 0.85×9` ≈ **0.84 : 1** on a 16:9 screen. So:
+| Source ratio | Typical art | Pick `h` | You get `w` |
+|---|---|---|---|
+| 0.5 : 1 (1:2, tall) | Full-body | 0.75 | 0.211 |
+| 0.84 : 1 (~5:6) | Half-body | 0.85 | 0.402 |
+| 2 : 1 (wide) | CG-style | 0.5 | 0.563 |
 
-| Source aspect ratio | Typical art | Use `w : h` |
+**② Placement:** compute `x` / `y` once `w` is known. The screen has three slots:
+
+| Where | x | y (sprite bottom on the screen bottom) |
 |---|---|---|
-| 0.84 : 1 | Half-body | `0.40 : 0.85` (the row above) |
-| 0.5 : 1 (1:2, tall) | Full-body | `0.30 : 0.96` |
-| 2 : 1 (wide) | CG-style | `0.80 : 0.32` |
+| Left | `0.04` | `1 - h` |
+| Center | `(1 - w) / 2` | `1 - h` |
+| Right | `0.96 - w` | `1 - h` |
 
-**The conversion:** to make a sprite occupy `h` of the screen height,
-`w = h × 0.5625 × (source_width ÷ source_height)` (`0.5625 = 9/16`, the 16:9 factor).
+To stand the sprite a little higher (showing some ground), subtract from `y`, e.g. `1 - h - 0.05`.
+
+**Why there is no copy-paste table:** `x` / `y` are reusable, `w` / `h` are not — they depend on
+your image's aspect ratio. Two sprites of different ratios sharing one `w h` pair means one of them
+is distorted.
 
 **Later `@show` calls draw on top.** Mind the order when sprites overlap. `@show`ing the same name
 again **moves** it rather than stacking a second copy.
@@ -122,8 +129,9 @@ again **moves** it rather than stacking a second copy.
 ### Moving sprites
 
 ```tsn-fragment
-@move alice to 0.30 0.10 0.40 0.85 over 0.6 ease_out
-@move alice to 0.30 0.10 0.40 0.85 over 0.6
+# center -> right (1:2 tall sprite; h=0.75 gives w=0.211)
+@show alice at 0.394 0.25 0.211 0.75
+@move alice to 0.749 0.25 0.211 0.75 over 0.6 ease_out
 ```
 
 - The first four numbers are the destination in normalized coordinates (`x y w h`), same as `@show`.

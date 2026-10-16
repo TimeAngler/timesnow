@@ -137,12 +137,23 @@ Drop a 16:9 image into `assets/bg/`, say `village.png`. Then in the script:
 Drop a PNG into `assets/character/`, say `alice.png`. Then:
 
 ```tsn-fragment
-@show alice at 0.55 0.10 0.40 0.85
+@show alice at 0.749 0.25 0.211 0.75
 @say alice "Hello."
 ```
 
-The four numbers after `at` are **x y w h**, all normalized 0–1. `0.55 0.10 0.40 0.85` means
-"right side of the screen, starting 10% from the top, 40% wide, 85% tall".
+The four numbers after `at` are **x y w h**, all normalized 0–1. The values above mean
+"right side of the screen, top edge at 25%, 21.1% wide, 75% tall".
+
+**Do not copy those numbers** — `w` and `h` decide whether the sprite gets squashed: the drawn
+aspect ratio is `(w × screen_width) : (h × screen_height)`, and it only keeps its shape when that
+matches the source image. The values above are computed for a **1:2 tall sprite** (e.g. 400×800):
+
+```
+w = h × 0.5625 × (source_width ÷ source_height)        0.5625 = 9/16, the 16:9 factor
+```
+
+For the left side use `x = 0.04`; to center it, `x = (1 - w) / 2`. **Details and more tables in the
+[DSL reference](dsl.en.md#scenes-and-sprites).**
 
 ## Add branching
 

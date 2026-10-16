@@ -74,7 +74,7 @@
 - **是什么：** 让剧本作者能写动画。最小可用的一种：
 
 ```
-@move alice to 0.30 0.10 0.40 0.85 over 0.6 ease_out
+@move alice to 0.749 0.25 0.211 0.75 over 0.6 ease_out
 @fade alice to 0.0 over 1.0
 ```
 
