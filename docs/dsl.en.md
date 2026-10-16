@@ -101,8 +101,38 @@ Use `{variable}` to drop a variable's value into a line:
 | Right | 0.55 | 0.10 | 0.40 | 0.85 |
 | Left | 0.05 | 0.10 | 0.40 | 0.85 |
 
+**Do not copy those `w` / `h` values blindly** — they decide whether your sprite gets squashed.
+All four numbers are screen fractions, so the **drawn aspect ratio is `(w × screen_width) : (h × screen_height)`**,
+and the sprite only keeps its shape when that matches the source image.
+
+The `w=0.40 h=0.85` row above works out to `0.40×16 : 0.85×9` ≈ **0.84 : 1** on a 16:9 screen. So:
+
+| Source aspect ratio | Typical art | Use `w : h` |
+|---|---|---|
+| 0.84 : 1 | Half-body | `0.40 : 0.85` (the row above) |
+| 0.5 : 1 (1:2, tall) | Full-body | `0.30 : 0.96` |
+| 2 : 1 (wide) | CG-style | `0.80 : 0.32` |
+
+**The conversion:** to make a sprite occupy `h` of the screen height,
+`w = h × 0.5625 × (source_width ÷ source_height)` (`0.5625 = 9/16`, the 16:9 factor).
+
 **Later `@show` calls draw on top.** Mind the order when sprites overlap. `@show`ing the same name
 again **moves** it rather than stacking a second copy.
+
+### Moving sprites
+
+```tsn-fragment
+@move alice to 0.30 0.10 0.40 0.85 over 0.6 ease_out
+@move alice to 0.30 0.10 0.40 0.85 over 0.6
+```
+
+- The first four numbers are the destination in normalized coordinates (`x y w h`), same as `@show`.
+- `over` takes the duration in seconds.
+- Easing is optional: `linear` (default) / `ease_in` / `ease_out` / `ease_in_out`.
+- **It blocks**: clicks don't advance the story while a sprite is moving, same as `@wait`.
+- **Saving during a move stores the destination** (the end state). After loading, the sprite is
+  already there — the animation does not replay.
+- If the sprite isn't on stage, `@move` warns and skips instead of blocking.
 
 ## Control flow
 
